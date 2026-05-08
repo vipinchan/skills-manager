@@ -1692,7 +1692,7 @@ function AddFromLibraryDialog({
     if (dirNameMapError || selectedAgents.length === 0) return true;
     if (!exportDirName) return false;
     return selectedAgents.some((agent) =>
-      (projectSkillDirNamesByAgent[agent] ?? []).includes(exportDirName)
+      (projectSkillDirNamesByAgent[agent] ?? []).includes(exportDirName.toLowerCase())
     );
   }, [dirNameMap, dirNameMapError, projectSkillDirNamesByAgent, selectedAgents]);
 

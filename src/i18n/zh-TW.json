@@ -192,6 +192,7 @@
       "enabled": "當前場景已啟用",
       "available": "當前場景未啟用"
     },
+    "sourceType": "來源類型",
     "sourceFilter": {
       "all": "全部來源",
       "local": "本機",

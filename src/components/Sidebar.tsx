@@ -52,16 +52,16 @@ export function Sidebar() {
   const [renameTarget, setRenameTarget] = useState<{ id: string; name: string; icon?: string | null } | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null);
   const [deleteProjectTarget, setDeleteProjectTarget] = useState<{ id: string; name: string } | null>(null);
+  const installedTools = useMemo(() => tools.filter((t) => t.installed && t.enabled), [tools]);
   const [orderedScenarios, setOrderedScenarios] = useState(scenarios);
   const [orderedProjects, setOrderedProjects] = useState(projects);
-  const [orderedTools, setOrderedTools] = useState<typeof installedTools>([]);
+  const [orderedTools, setOrderedTools] = useState(installedTools);
   const scenarioReorderQueueRef = useRef<Promise<void>>(Promise.resolve());
   const projectReorderQueueRef = useRef<Promise<void>>(Promise.resolve());
   const [scenariosOpen, setScenariosOpen] = useState(true);
   const [projectsOpen, setProjectsOpen] = useState(true);
   const [globalWorkspaceOpen, setGlobalWorkspaceOpen] = useState(true);
 
-  const installedTools = useMemo(() => tools.filter((t) => t.installed && t.enabled), [tools]);
   const globalSkillsByAgent = useMemo(() => {
     const map: Record<string, number> = {};
     for (const tool of installedTools) {
