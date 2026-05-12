@@ -1048,13 +1048,14 @@ export function ProjectDetail() {
                 <div
                   key={skillKey}
                   className={cn(
-                    "app-panel group relative flex h-full flex-col overflow-hidden transition-all hover:border-border hover:bg-surface-hover",
+                    "app-panel group relative flex h-full cursor-pointer flex-col overflow-hidden transition-all hover:border-border hover:bg-surface-hover",
                     skill.enabledCount > 0 && "border-l-2 border-l-accent",
                     skill.enabledCount === 0 && "opacity-60",
-                    isMultiSelect && "cursor-pointer",
                     isMultiSelect && isSelected && "ring-1 ring-accent border-accent/40"
                   )}
-                  onClick={isMultiSelect ? () => toggleSelect(skillKey) : undefined}
+                  onClick={() =>
+                    isMultiSelect ? toggleSelect(skillKey) : handleOpenDetail(skill)
+                  }
                 >
                   <div className="flex items-center gap-2.5 px-3.5 pt-3 pb-1.5">
                     {isMultiSelect && (
@@ -1064,8 +1065,6 @@ export function ProjectDetail() {
                     )}
                     <h3
                       className="flex-1 truncate text-[14px] font-semibold text-primary"
-                      onClick={!isMultiSelect ? () => handleOpenDetail(skill) : undefined}
-                      style={!isMultiSelect ? { cursor: "pointer" } : undefined}
                       title={skill.name}
                     >
                       {skill.name}
@@ -1120,7 +1119,7 @@ export function ProjectDetail() {
                         />
                         {canUpdateCenter && (
                           <button
-                            onClick={() => handleUpdateCenter(skill)}
+                            onClick={(e) => { e.stopPropagation(); handleUpdateCenter(skill); }}
                             disabled={isUpdatingCenter || isUpdatingProject}
                             className="rounded px-2 py-1 text-[13px] font-medium text-muted transition-colors outline-none hover:bg-surface-hover hover:text-secondary disabled:opacity-50"
                             title={t("project.updateCenter")}
@@ -1134,7 +1133,7 @@ export function ProjectDetail() {
                         )}
                         {canUpdateProject && (
                           <button
-                            onClick={() => handleUpdateProject(skill)}
+                            onClick={(e) => { e.stopPropagation(); handleUpdateProject(skill); }}
                             disabled={isUpdatingCenter || isUpdatingProject}
                             className="rounded px-2 py-1 text-[13px] font-medium text-muted transition-colors outline-none hover:bg-surface-hover hover:text-secondary disabled:opacity-50"
                             title={
@@ -1154,7 +1153,7 @@ export function ProjectDetail() {
                         )}
                         {project.supports_skill_toggle ? (
                           <button
-                            onClick={() => handleToggleSkill(skill)}
+                            onClick={(e) => { e.stopPropagation(); handleToggleSkill(skill); }}
                             disabled={isToggling}
                             className={cn(
                               "rounded px-2 py-1 text-[13px] font-medium transition-colors outline-none",
@@ -1173,7 +1172,7 @@ export function ProjectDetail() {
                           </button>
                         ) : null}
                         <button
-                          onClick={() => setDeleteTarget(skill)}
+                          onClick={(e) => { e.stopPropagation(); setDeleteTarget(skill); }}
                           className="rounded px-2 py-1 text-muted transition-colors outline-none opacity-0 group-hover:opacity-100 hover:bg-red-500/10 hover:text-red-500"
                           title={t("project.deleteSkill")}
                         >
@@ -1191,13 +1190,14 @@ export function ProjectDetail() {
               <div
                 key={skillKey}
                 className={cn(
-                  "app-panel group flex items-center gap-3.5 rounded-xl border-transparent px-3.5 py-3 transition-all hover:border-border hover:bg-surface-hover",
+                  "app-panel group flex cursor-pointer items-center gap-3.5 rounded-xl border-transparent px-3.5 py-3 transition-all hover:border-border hover:bg-surface-hover",
                   skill.enabledCount > 0 && "border-l-2 border-l-accent",
                   skill.enabledCount === 0 && "opacity-60",
-                  isMultiSelect && "cursor-pointer",
                   isMultiSelect && isSelected && "ring-1 ring-accent border-accent/40"
                 )}
-                onClick={isMultiSelect ? () => toggleSelect(skillKey) : undefined}
+                onClick={() =>
+                  isMultiSelect ? toggleSelect(skillKey) : handleOpenDetail(skill)
+                }
               >
                 {isMultiSelect && (
                   isSelected
@@ -1206,8 +1206,6 @@ export function ProjectDetail() {
                 )}
                 <h3
                   className="w-[180px] shrink-0 truncate text-[14px] font-semibold text-secondary"
-                  onClick={!isMultiSelect ? () => handleOpenDetail(skill) : undefined}
-                  style={!isMultiSelect ? { cursor: "pointer" } : undefined}
                   title={skill.name}
                 >
                   {skill.name}
@@ -1260,7 +1258,7 @@ export function ProjectDetail() {
                   <div className="flex shrink-0 items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
                     {canUpdateCenter && (
                       <button
-                        onClick={() => handleUpdateCenter(skill)}
+                        onClick={(e) => { e.stopPropagation(); handleUpdateCenter(skill); }}
                         disabled={isUpdatingCenter || isUpdatingProject}
                         className="rounded p-0.5 text-muted transition-colors hover:bg-surface-hover hover:text-secondary disabled:opacity-50"
                         title={t("project.updateCenter")}
@@ -1274,7 +1272,7 @@ export function ProjectDetail() {
                     )}
                     {canUpdateProject && (
                       <button
-                        onClick={() => handleUpdateProject(skill)}
+                        onClick={(e) => { e.stopPropagation(); handleUpdateProject(skill); }}
                         disabled={isUpdatingCenter || isUpdatingProject}
                         className="rounded p-0.5 text-muted transition-colors hover:bg-surface-hover hover:text-secondary disabled:opacity-50"
                         title={
@@ -1294,7 +1292,7 @@ export function ProjectDetail() {
                     )}
                     {project.supports_skill_toggle ? (
                       <button
-                        onClick={() => handleToggleSkill(skill)}
+                        onClick={(e) => { e.stopPropagation(); handleToggleSkill(skill); }}
                         disabled={isToggling}
                         className={cn(
                           "rounded px-2 py-0.5 text-[13px] font-medium transition-colors outline-none",
@@ -1313,7 +1311,7 @@ export function ProjectDetail() {
                       </button>
                     ) : null}
                     <button
-                      onClick={() => setDeleteTarget(skill)}
+                      onClick={(e) => { e.stopPropagation(); setDeleteTarget(skill); }}
                       className="rounded p-0.5 text-muted transition-colors hover:bg-red-500/10 hover:text-red-500"
                       title={t("project.deleteSkill")}
                     >

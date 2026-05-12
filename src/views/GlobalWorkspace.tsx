@@ -24,6 +24,7 @@ import { MultiSelectToolbar } from "../components/MultiSelectToolbar";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { PresetBar } from "../components/PresetBar";
 import { AgentIcon } from "../components/AgentIcon";
+import { SkillDetailPanel } from "../components/SkillDetailPanel";
 import { getTagColor, getTagActiveColor } from "../lib/skillTags";
 import * as api from "../lib/tauri";
 import type { ManagedSkill, ToolInfo } from "../lib/tauri";
@@ -198,6 +199,12 @@ export function GlobalWorkspace() {
   const [removingId, setRemovingId] = useState<string | null>(null);
   const [batchRemoveConfirm, setBatchRemoveConfirm] = useState(false);
   const [batchRemoving, setBatchRemoving] = useState(false);
+  const [detailSkillId, setDetailSkillId] = useState<string | null>(null);
+
+  const detailSkill = useMemo(
+    () => (detailSkillId ? managedSkills.find((s) => s.id === detailSkillId) ?? null : null),
+    [detailSkillId, managedSkills]
+  );
 
   const installedTools = useMemo(() => tools.filter((t) => t.installed && t.enabled), [tools]);
 
@@ -606,11 +613,12 @@ export function GlobalWorkspace() {
                 <div
                   key={skill.id}
                   className={cn(
-                    "app-panel group relative flex h-full flex-col transition-all hover:border-border hover:bg-surface-hover",
-                    isMultiSelect && "cursor-pointer",
+                    "app-panel group relative flex h-full cursor-pointer flex-col transition-all hover:border-border hover:bg-surface-hover",
                     isMultiSelect && isSelected && "ring-1 ring-accent border-accent/40"
                   )}
-                  onClick={isMultiSelect ? () => toggleSelect(skill.id) : undefined}
+                  onClick={() =>
+                    isMultiSelect ? toggleSelect(skill.id) : setDetailSkillId(skill.id)
+                  }
                 >
                   <div className="flex items-center gap-2.5 px-3.5 pt-3 pb-1.5">
                     {isMultiSelect ? (
@@ -652,7 +660,10 @@ export function GlobalWorkspace() {
                   <div className="mt-auto flex items-center justify-end border-t border-border-subtle px-3.5 py-2">
                     {!isMultiSelect && (
                       <button
-                        onClick={() => handleRemove(skill)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleRemove(skill);
+                        }}
                         disabled={removing}
                         title={t("globalWorkspace.removeSkill")}
                         className="rounded p-1 text-faint opacity-0 transition-all group-hover:opacity-100 hover:bg-red-500/10 hover:text-red-500 disabled:opacity-50"
@@ -672,11 +683,12 @@ export function GlobalWorkspace() {
               <div
                 key={skill.id}
                 className={cn(
-                  "app-panel group flex items-center gap-3.5 rounded-xl border-transparent px-3.5 py-3 transition-all hover:border-border hover:bg-surface-hover",
-                  isMultiSelect && "cursor-pointer",
+                  "app-panel group flex cursor-pointer items-center gap-3.5 rounded-xl border-transparent px-3.5 py-3 transition-all hover:border-border hover:bg-surface-hover",
                   isMultiSelect && isSelected && "ring-1 ring-accent border-accent/40"
                 )}
-                onClick={isMultiSelect ? () => toggleSelect(skill.id) : undefined}
+                onClick={() =>
+                  isMultiSelect ? toggleSelect(skill.id) : setDetailSkillId(skill.id)
+                }
               >
                 {isMultiSelect ? (
                   isSelected
@@ -711,7 +723,10 @@ export function GlobalWorkspace() {
                 )}
                 {!isMultiSelect && (
                   <button
-                    onClick={() => handleRemove(skill)}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleRemove(skill);
+                    }}
                     disabled={removing}
                     title={t("globalWorkspace.removeSkill")}
                     className="shrink-0 rounded p-0.5 text-faint opacity-0 transition-all group-hover:opacity-100 hover:bg-red-500/10 hover:text-red-500 disabled:opacity-50"
@@ -726,6 +741,13 @@ export function GlobalWorkspace() {
           })}
         </div>
       )}
+
+      <SkillDetailPanel
+        key={detailSkill?.id ?? "global-workspace-skill-detail-empty"}
+        skill={detailSkill}
+        onClose={() => setDetailSkillId(null)}
+        tools={tools}
+      />
 
       {addDialogOpen && currentTool && (
         <AddSkillDialog
