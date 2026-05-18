@@ -2,6 +2,7 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::time::Instant;
 use tauri::State;
 use walkdir::WalkDir;
 
@@ -155,13 +156,20 @@ pub async fn get_managed_skills(
 ) -> Result<Vec<ManagedSkillDto>, AppError> {
     let store = store.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let start = Instant::now();
         let skills = store.get_all_skills().map_err(AppError::db)?;
         let all_targets = store.get_all_targets().map_err(AppError::db)?;
         let tags_map = store.get_tags_map().map_err(AppError::db)?;
-        Ok(skills
+        let count = skills.len();
+        let dtos: Vec<ManagedSkillDto> = skills
             .into_iter()
             .map(|skill| managed_skill_to_dto(&store, skill, &all_targets, &tags_map))
-            .collect())
+            .collect();
+        log::info!(
+            "get_managed_skills: {count} skills in {} ms",
+            start.elapsed().as_millis()
+        );
+        Ok(dtos)
     })
     .await?
 }

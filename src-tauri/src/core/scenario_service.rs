@@ -1,6 +1,7 @@
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::time::Instant;
 
 use super::{
     error::AppError,
@@ -123,7 +124,13 @@ pub fn sync_desired_targets(
         .map(|target| ((target.skill_id.clone(), target.tool.clone()), target))
         .collect();
 
+    let batch_start = Instant::now();
+    let mut synced_count = 0usize;
+    let mut skipped_count = 0usize;
+    let mut failed_count = 0usize;
+
     for desired in desired_targets {
+        let target_start = Instant::now();
         let key = (desired.skill_id.clone(), desired.tool.clone());
         if let Some(existing) = existing_targets.get(&key) {
             let target_path = PathBuf::from(&existing.target_path);
@@ -145,6 +152,7 @@ pub fn sync_desired_targets(
                 && existing.status == "ok"
                 && sync_engine::is_target_current(&desired.source, &desired.target, desired.mode)
             {
+                skipped_count += 1;
                 continue;
             }
         }
@@ -168,16 +176,36 @@ pub fn sync_desired_targets(
                         desired.skill_id
                     );
                 }
+                synced_count += 1;
+                let elapsed = target_start.elapsed().as_millis();
+                if elapsed >= 200 {
+                    log::warn!(
+                        "sync_desired_targets: slow sync ({elapsed} ms, mode={}) for skill {} ({}) -> {}",
+                        actual_mode.as_str(),
+                        desired.skill_id,
+                        desired.skill_name,
+                        desired.target.display()
+                    );
+                }
             }
             Err(e) => {
+                failed_count += 1;
                 log::warn!(
-                    "Failed to sync skill {} to {}: {e}",
+                    "Failed to sync skill {} ({}) to {} after {} ms: {e}",
                     desired.skill_id,
-                    desired.target.display()
+                    desired.skill_name,
+                    desired.target.display(),
+                    target_start.elapsed().as_millis()
                 );
             }
         }
     }
+
+    log::info!(
+        "sync_desired_targets: {} targets in {} ms (synced={synced_count}, skipped={skipped_count}, failed={failed_count})",
+        desired_targets.len(),
+        batch_start.elapsed().as_millis()
+    );
 
     Ok(())
 }
