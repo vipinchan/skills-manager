@@ -447,8 +447,13 @@ export function GlobalWorkspace() {
     void loadLocalSkills();
     // On unmount or agent switch, invalidate this in-flight load so its result
     // (or error toast) can't land on the next page / an unmounted component.
+    // Also clear loadedAgentKeyRef — otherwise a StrictMode remount (or any
+    // quick remount of the same agent) sees the ref still pointing at this
+    // key, skips the reload, and the invalidated in-flight request's finally
+    // block bails out without resetting `localSkillsLoading` → stuck spinner.
     return () => {
       localSkillsRequestRef.current += 1;
+      loadedAgentKeyRef.current = null;
     };
   }, [currentToolKey, loadLocalSkills]);
 
