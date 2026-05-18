@@ -1180,7 +1180,7 @@ export function ProjectDetail() {
                         ) : null}
                         <button
                           onClick={(e) => { e.stopPropagation(); setDeleteTarget(skill); }}
-                          className="rounded px-2 py-1 text-muted transition-colors outline-none opacity-0 group-hover:opacity-100 hover:bg-red-500/10 hover:text-red-500"
+                          className="rounded px-2 py-1 text-muted transition-colors outline-none hover:bg-red-500/10 hover:text-red-500"
                           title={t("project.deleteSkill")}
                         >
                           <Trash2 className="h-3.5 w-3.5" />
@@ -1272,69 +1272,71 @@ export function ProjectDetail() {
                 </div>
 
                 {!isMultiSelect && (
-                  <div className="flex shrink-0 items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
-                    {canUpdateCenter && (
-                      <button
-                        onClick={(e) => { e.stopPropagation(); handleUpdateCenter(skill); }}
-                        disabled={isUpdatingCenter || isUpdatingProject}
-                        className="rounded p-0.5 text-muted transition-colors hover:bg-surface-hover hover:text-secondary disabled:opacity-50"
-                        title={t("project.updateCenter")}
-                      >
-                        {isUpdatingCenter ? (
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        ) : (
-                          <Upload className="h-3.5 w-3.5" />
-                        )}
-                      </button>
-                    )}
-                    {canUpdateProject && (
-                      <button
-                        onClick={(e) => { e.stopPropagation(); handleUpdateProject(skill); }}
-                        disabled={isUpdatingCenter || isUpdatingProject}
-                        className="rounded p-0.5 text-muted transition-colors hover:bg-surface-hover hover:text-secondary disabled:opacity-50"
-                        title={
-                          skill.status === "project_newer"
-                            ? t("project.resetFromCenter")
-                            : t("project.updateProject")
-                        }
-                      >
-                        {isUpdatingProject ? (
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        ) : skill.status === "project_newer" ? (
-                          <RotateCcw className="h-3.5 w-3.5" />
-                        ) : (
-                          <Download className="h-3.5 w-3.5" />
-                        )}
-                      </button>
-                    )}
-                    {project.supports_skill_toggle ? (
-                      <button
-                        onClick={(e) => { e.stopPropagation(); handleToggleSkill(skill); }}
-                        disabled={isToggling}
-                        className={cn(
-                          "rounded px-2 py-0.5 text-[13px] font-medium transition-colors outline-none",
-                          skill.enabledCount > 0
-                            ? "text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/10"
-                            : "text-muted hover:bg-surface-hover hover:text-secondary"
-                        )}
-                      >
-                        {isToggling ? (
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        ) : skill.enabledCount === skill.totalCount ? (
-                          t("project.enabled")
-                        ) : (
-                          t("project.enableSkill")
-                        )}
-                      </button>
-                    ) : null}
+                  <>
+                    <div className="flex shrink-0 items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+                      {canUpdateCenter && (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handleUpdateCenter(skill); }}
+                          disabled={isUpdatingCenter || isUpdatingProject}
+                          className="rounded p-0.5 text-muted transition-colors hover:bg-surface-hover hover:text-secondary disabled:opacity-50"
+                          title={t("project.updateCenter")}
+                        >
+                          {isUpdatingCenter ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <Upload className="h-3.5 w-3.5" />
+                          )}
+                        </button>
+                      )}
+                      {canUpdateProject && (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handleUpdateProject(skill); }}
+                          disabled={isUpdatingCenter || isUpdatingProject}
+                          className="rounded p-0.5 text-muted transition-colors hover:bg-surface-hover hover:text-secondary disabled:opacity-50"
+                          title={
+                            skill.status === "project_newer"
+                              ? t("project.resetFromCenter")
+                              : t("project.updateProject")
+                          }
+                        >
+                          {isUpdatingProject ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : skill.status === "project_newer" ? (
+                            <RotateCcw className="h-3.5 w-3.5" />
+                          ) : (
+                            <Download className="h-3.5 w-3.5" />
+                          )}
+                        </button>
+                      )}
+                      {project.supports_skill_toggle ? (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handleToggleSkill(skill); }}
+                          disabled={isToggling}
+                          className={cn(
+                            "rounded px-2 py-0.5 text-[13px] font-medium transition-colors outline-none",
+                            skill.enabledCount > 0
+                              ? "text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/10"
+                              : "text-muted hover:bg-surface-hover hover:text-secondary"
+                          )}
+                        >
+                          {isToggling ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : skill.enabledCount === skill.totalCount ? (
+                            t("project.enabled")
+                          ) : (
+                            t("project.enableSkill")
+                          )}
+                        </button>
+                      ) : null}
+                    </div>
                     <button
                       onClick={(e) => { e.stopPropagation(); setDeleteTarget(skill); }}
-                      className="rounded p-0.5 text-muted transition-colors hover:bg-red-500/10 hover:text-red-500"
+                      className="shrink-0 rounded p-0.5 text-muted transition-colors hover:bg-red-500/10 hover:text-red-500"
                       title={t("project.deleteSkill")}
                     >
                       <Trash2 className="h-3.5 w-3.5" />
                     </button>
-                  </div>
+                  </>
                 )}
               </div>
             );

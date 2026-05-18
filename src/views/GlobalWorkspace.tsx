@@ -386,6 +386,7 @@ export function GlobalWorkspace() {
   const [localContentTab, setLocalContentTab] = useState<"local" | "diff" | "center">("local");
   const [uploadConfirmSkill, setUploadConfirmSkill] = useState<ProjectSkill | null>(null);
   const [pullConfirmSkill, setPullConfirmSkill] = useState<ProjectSkill | null>(null);
+  const [deleteLocalConfirmSkill, setDeleteLocalConfirmSkill] = useState<ProjectSkill | null>(null);
   const localDetailRequestRef = useRef(0);
 
   const installedTools = useMemo(() => tools.filter((t) => t.installed && t.enabled), [tools]);
@@ -462,6 +463,7 @@ export function GlobalWorkspace() {
     setLocalDetailSkill(null);
     setUploadConfirmSkill(null);
     setPullConfirmSkill(null);
+    setDeleteLocalConfirmSkill(null);
     setTagFilters(new Set());
   }, [currentTool?.key]);
 
@@ -582,6 +584,25 @@ export function GlobalWorkspace() {
     [currentTool, loadLocalSkills, refreshManagedSkills, t]
   );
 
+  const handleDeleteLocalSkill = useCallback(
+    async (skill: ProjectSkill) => {
+      if (!currentTool) return;
+      const key = `delete:${skill.relative_path}`;
+      setLocalActionKey(key);
+      try {
+        await api.deleteGlobalLocalSkill(currentTool.key, skill.relative_path);
+        toast.success(t("globalWorkspace.localSkills.deletedLocalToast", { name: skill.name, agent: currentTool.display_name }));
+        await loadLocalSkills();
+      } catch (error: unknown) {
+        toast.error(getErrorMessage(error, t("common.error")));
+      } finally {
+        setLocalActionKey(null);
+        setDeleteLocalConfirmSkill(null);
+      }
+    },
+    [currentTool, loadLocalSkills, t]
+  );
+
   const handlePullLocalSkill = useCallback(
     async (skill: ProjectSkill) => {
       if (!currentTool) return;
@@ -663,9 +684,11 @@ export function GlobalWorkspace() {
   const renderLocalSkillActions = (skill: ProjectSkill, variant: "grid" | "list") => {
     const uploadKey = `upload:${skill.relative_path}`;
     const pullKey = `pull:${skill.relative_path}`;
+    const deleteKey = `delete:${skill.relative_path}`;
     const canPull = skill.sync_status === "center_newer" || skill.sync_status === "diverged";
     const isInSync = skill.sync_status === "in_sync";
     const isManaged = !!skill.center_skill_id && managedLocalIds.has(skill.center_skill_id);
+    const canDeleteLocal = !isManaged && skill.sync_status === "project_only";
     const removing = removingLocalSkillId === skill.relative_path;
     const buttonClassName = variant === "grid"
       ? "rounded px-2 py-1 text-[13px] font-medium text-muted transition-colors outline-none hover:bg-surface-hover hover:text-secondary disabled:opacity-50"
@@ -726,6 +749,22 @@ export function GlobalWorkspace() {
             className={cn(buttonClassName, "hover:bg-red-500/10 hover:text-red-500")}
           >
             {removing ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Trash2 className="h-3.5 w-3.5" />
+            )}
+          </button>
+        ) : canDeleteLocal ? (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              setDeleteLocalConfirmSkill(skill);
+            }}
+            disabled={localActionKey === deleteKey}
+            title={t("globalWorkspace.localSkills.deleteLocal")}
+            className={cn(buttonClassName, "hover:bg-red-500/10 hover:text-red-500")}
+          >
+            {localActionKey === deleteKey ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
             ) : (
               <Trash2 className="h-3.5 w-3.5" />
@@ -1094,6 +1133,18 @@ export function GlobalWorkspace() {
         confirmLabel={t("globalWorkspace.localSkills.pull")}
         onClose={() => setPullConfirmSkill(null)}
         onConfirm={() => pullConfirmSkill ? handlePullLocalSkill(pullConfirmSkill) : Promise.resolve()}
+      />
+      <ConfirmDialog
+        open={!!deleteLocalConfirmSkill}
+        title={t("globalWorkspace.localSkills.deleteLocalConfirmTitle")}
+        message={t("globalWorkspace.localSkills.deleteLocalConfirmMessage", {
+          name: deleteLocalConfirmSkill?.name ?? "",
+          agent: currentTool?.display_name ?? "",
+        })}
+        tone="danger"
+        confirmLabel={t("common.delete")}
+        onClose={() => setDeleteLocalConfirmSkill(null)}
+        onConfirm={() => deleteLocalConfirmSkill ? handleDeleteLocalSkill(deleteLocalConfirmSkill) : Promise.resolve()}
       />
     </div>
   );
