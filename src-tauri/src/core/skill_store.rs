@@ -957,8 +957,29 @@ impl SkillStore {
         let tx = conn.unchecked_transaction()?;
         tx.execute("DELETE FROM scenario_skill_tools", [])?;
         tx.execute("DELETE FROM scenario_skills", [])?;
+
+        // OR IGNORE / OR REPLACE don't suppress FK violations in SQLite, so we
+        // must skip memberships that reference skills or scenarios no longer in the DB.
+        let valid_skill_ids: std::collections::HashSet<String> = {
+            let mut stmt = tx.prepare("SELECT id FROM skills")?;
+            let ids: rusqlite::Result<std::collections::HashSet<String>> =
+                stmt.query_map([], |row| row.get::<_, String>(0))?.collect();
+            ids?
+        };
+        let valid_scenario_ids: std::collections::HashSet<String> = {
+            let mut stmt = tx.prepare("SELECT id FROM scenarios")?;
+            let ids: rusqlite::Result<std::collections::HashSet<String>> =
+                stmt.query_map([], |row| row.get::<_, String>(0))?.collect();
+            ids?
+        };
+
         let now = chrono::Utc::now().timestamp_millis();
         for member in memberships {
+            if !valid_skill_ids.contains(&member.skill_id)
+                || !valid_scenario_ids.contains(&member.scenario_id)
+            {
+                continue;
+            }
             tx.execute(
                 "INSERT OR IGNORE INTO scenario_skills (scenario_id, skill_id, added_at, sort_order)
                  VALUES (?1, ?2, ?3, ?4)",
