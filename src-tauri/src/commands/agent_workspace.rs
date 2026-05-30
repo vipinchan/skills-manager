@@ -8,7 +8,9 @@ use crate::commands::projects::{
     source_ref_matches_skill_path, ProjectSkillDocumentDto,
 };
 use crate::core::skill_store::{SkillRecord, SkillStore, SkillTargetRecord};
-use crate::core::{error::AppError, installer, project_scanner, sync_engine, tool_adapters};
+use crate::core::{
+    error::AppError, installer, project_scanner, scenario_service, sync_engine, tool_adapters,
+};
 
 fn target_path_equals_skill(target_path: &str, skill_path: &str) -> bool {
     if target_path == skill_path {
@@ -268,6 +270,13 @@ fn import_agent_local_skill_to_center(
                 .update_skill_source_ref(&existing.id, &skill.path)
                 .map_err(AppError::db)?;
         }
+
+        // Register this agent as a managed sync target so the adopted skill is
+        // recognized as managed (gives it a delete button). Reusing the regular
+        // sync path keeps the target consistent with every other managed skill:
+        // sync_engine owns the on-disk artifact, so later unsync/scenario-sync
+        // touch only that managed artifact, never the user's source.
+        scenario_service::sync_single_skill_to_tool(store, &existing.id, agent)?;
         return Ok(());
     }
 
@@ -298,6 +307,16 @@ fn import_agent_local_skill_to_center(
     };
 
     store.insert_skill(&skill_record).map_err(AppError::db)?;
+    // Register the managed sync target (see note above). On failure, drop the
+    // just-inserted skill row (which cascades to any target) so we never leave
+    // an orphaned, button-less skill behind. We deliberately do NOT delete the
+    // central directory: `install_from_local` may have de-duplicated onto a
+    // directory shared with another skill, and removing it could corrupt that
+    // skill — an orphaned dir is harmless by comparison.
+    if let Err(err) = scenario_service::sync_single_skill_to_tool(store, &skill_record.id, agent) {
+        let _ = store.delete_skill(&skill_record.id);
+        return Err(err);
+    }
     Ok(())
 }
 
@@ -396,7 +415,7 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
-    fn importing_agent_local_skill_does_not_attach_scenario_or_target() {
+    fn importing_agent_local_skill_attaches_target_but_not_scenario() {
         let _guard = central_repo::test_base_dir_lock();
         let temp = tempfile::tempdir().unwrap();
         central_repo::set_test_base_dir_override(Some(temp.path().join("center")));
@@ -446,11 +465,30 @@ mod tests {
 
         let skills = store.get_all_skills().unwrap();
         assert_eq!(skills.len(), 1);
+        // Importing must NOT silently enroll the skill into the active scenario.
         assert!(store
             .get_scenarios_for_skill(&skills[0].id)
             .unwrap()
             .is_empty());
-        assert!(store.get_all_targets().unwrap().is_empty());
+        // But it MUST register a managed sync target for the importing agent,
+        // pointed at the skill's actual on-disk location, so the workspace
+        // recognizes it as managed and shows its delete button.
+        let targets = store.get_all_targets().unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].skill_id, skills[0].id);
+        assert_eq!(targets[0].tool, "test_agent");
+        assert_eq!(targets[0].target_path, skill_dir.to_string_lossy());
+
+        // The on-disk artifact must be a sync_engine-owned symlink resolving to
+        // the central copy — NOT the user's original real directory. This is
+        // the property that makes a later unsync safe: removing the target only
+        // drops the managed link, leaving the central skill intact.
+        let meta = std::fs::symlink_metadata(&skill_dir).unwrap();
+        assert!(meta.file_type().is_symlink());
+        assert_eq!(
+            std::fs::canonicalize(&skill_dir).unwrap(),
+            std::fs::canonicalize(&skills[0].central_path).unwrap()
+        );
 
         central_repo::set_test_base_dir_override(None);
     }
@@ -586,6 +624,86 @@ mod tests {
                 .unwrap();
         assert!(original_content.contains("Center copy"));
         assert!(skills.iter().any(|skill| skill.name == "local-tool-2"));
+
+        central_repo::set_test_base_dir_override(None);
+    }
+
+    #[test]
+    fn importing_verified_center_match_reuses_skill_and_attaches_target() {
+        let _guard = central_repo::test_base_dir_lock();
+        let temp = tempfile::tempdir().unwrap();
+        central_repo::set_test_base_dir_override(Some(temp.path().join("center")));
+
+        let db_path = temp.path().join("store.db");
+        let store = SkillStore::new(&db_path).unwrap();
+
+        let skills_root = temp.path().join("agent-skills");
+        let skill_dir = skills_root.join("local-tool");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: local-tool\ndescription: Agent copy\n---\nlocal\n",
+        )
+        .unwrap();
+
+        // Pre-existing center skill whose source_ref points at the local skill,
+        // so the import resolves to a *verified* match (the existing-match
+        // branch) rather than creating a duplicate.
+        let existing = installer::install_from_local(&skill_dir, Some("local-tool")).unwrap();
+        let now = chrono::Utc::now().timestamp_millis();
+        store
+            .insert_skill(&SkillRecord {
+                id: "existing-center".to_string(),
+                name: "local-tool".to_string(),
+                description: existing.description.clone(),
+                source_type: "local".to_string(),
+                source_ref: Some(skill_dir.to_string_lossy().to_string()),
+                source_ref_resolved: None,
+                source_subpath: None,
+                source_branch: None,
+                source_revision: None,
+                remote_revision: None,
+                central_path: existing.central_path.to_string_lossy().to_string(),
+                content_hash: Some(existing.content_hash.clone()),
+                enabled: true,
+                created_at: now,
+                updated_at: now,
+                status: "ok".to_string(),
+                update_status: "local_only".to_string(),
+                last_checked_at: Some(now),
+                last_check_error: None,
+            })
+            .unwrap();
+
+        store
+            .set_setting(
+                "custom_tools",
+                &serde_json::json!([
+                    {
+                        "key": "test_agent",
+                        "display_name": "Test Agent",
+                        "skills_dir": skills_root.to_string_lossy(),
+                        "project_relative_skills_dir": ".test-agent/skills"
+                    }
+                ])
+                .to_string(),
+            )
+            .unwrap();
+
+        import_agent_local_skill_to_center(&store, "test_agent", "local-tool").unwrap();
+
+        // The existing center skill is reused, not duplicated.
+        let skills = store.get_all_skills().unwrap();
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].id, "existing-center");
+
+        // And a managed target is attached for the importing agent at the
+        // skill's actual on-disk path.
+        let targets = store.get_all_targets().unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].skill_id, "existing-center");
+        assert_eq!(targets[0].tool, "test_agent");
+        assert_eq!(targets[0].target_path, skill_dir.to_string_lossy());
 
         central_repo::set_test_base_dir_override(None);
     }
