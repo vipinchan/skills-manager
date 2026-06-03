@@ -62,7 +62,8 @@ interface ProjectSkillGroup {
 }
 
 function getDefaultExportAgents(targets: ProjectAgentTarget[], savedValue?: string | null) {
-  const availableKeys = new Set(targets.map((target) => target.key));
+  const enabledTargets = targets.filter((target) => target.installed && target.enabled);
+  const availableKeys = new Set(enabledTargets.map((target) => target.key));
   if (savedValue) {
     try {
       const parsed = JSON.parse(savedValue);
@@ -78,7 +79,7 @@ function getDefaultExportAgents(targets: ProjectAgentTarget[], savedValue?: stri
   }
 
   const prioritized = PROJECT_EXPORT_AGENT_PRIORITY.filter((key) => availableKeys.has(key));
-  const fallback = targets.map((target) => target.key);
+  const fallback = enabledTargets.map((target) => target.key);
   return Array.from(new Set((prioritized.length > 0 ? prioritized : fallback).slice(0, 3)));
 }
 
@@ -436,6 +437,15 @@ export function ProjectDetail() {
     }
     return selectedExportAgents.filter((k) => availableKeys.has(k));
   }, [exportTargets, lastUsedExportAgents, selectedExportAgents]);
+
+  const presetBarAgentKeys = useMemo(() => {
+    const availableKeys = new Set(
+      exportTargets
+        .filter((target) => target.installed && target.enabled)
+        .map((target) => target.key)
+    );
+    return selectedExportAgents.filter((key) => availableKeys.has(key));
+  }, [exportTargets, selectedExportAgents]);
 
   const enabledCount = groupedSkills.filter((s) => s.enabledCount > 0).length;
   const allTags = useMemo(() => {
@@ -982,11 +992,11 @@ export function ProjectDetail() {
         )}
 
         {/* Preset bar */}
-        {presets.length > 0 && selectedExportAgents.length > 0 && (
+        {presets.length > 0 && presetBarAgentKeys.length > 0 && (
           <PresetBar
             presets={presets}
             managedSkills={managedSkills}
-            agentKeys={selectedExportAgents}
+            agentKeys={presetBarAgentKeys}
             existsInWorkspace={presetSkillExistsInProject}
             onAddSkill={handleAddPresetSkillToProject}
             onRemoveSkill={handleRemovePresetSkillFromProject}
