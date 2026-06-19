@@ -796,7 +796,7 @@ fn install_local_action(
         bail!("local path does not exist: {}", path.display());
     }
 
-    let _lock = RepoLock::acquire("cli install local")?;
+    let _lock = RepoLock::acquire_foreground("cli install local")?;
     let result = installer::install_from_local(&path, name)?;
     let metadata = cmd::InstallSourceMetadata {
         source_type: "local".to_string(),
@@ -833,7 +833,7 @@ fn install_git_action(
         proxy_url.as_deref(),
     )?;
     let result = (|| -> anyhow::Result<(String, String, String)> {
-        let _lock = RepoLock::acquire("cli install git")?;
+        let _lock = RepoLock::acquire_foreground("cli install git")?;
         let skill_dir =
             cmd::resolve_skill_dir(&temp_dir, parsed.subpath.as_deref(), None).map_err(map_app_err)?;
         let revision = git_fetcher::get_head_revision(&temp_dir)?;
@@ -871,7 +871,7 @@ fn install_skillssh_action(
     let cancel = Arc::new(AtomicBool::new(false));
     let temp_dir = git_fetcher::clone_repo_ref(&repo_url, None, Some(&cancel), proxy_url.as_deref())?;
     let result = (|| -> anyhow::Result<(String, String, String)> {
-        let _lock = RepoLock::acquire("cli install skillssh")?;
+        let _lock = RepoLock::acquire_foreground("cli install skillssh")?;
         let skill_dir =
             cmd::resolve_skill_dir(&temp_dir, None, Some(&skill_id_field)).map_err(map_app_err)?;
         let revision = git_fetcher::get_head_revision(&temp_dir)?;
@@ -1387,7 +1387,7 @@ fn run_adopt(
     let mut adopted = Vec::new();
     for c in &candidates {
         let dir = PathBuf::from(&c.path);
-        let _lock = RepoLock::acquire("cli adopt")?;
+        let _lock = RepoLock::acquire_foreground("cli adopt")?;
         let result = installer::install_from_local(&dir, None)?;
         let metadata = if let Some((clone_url, subpath, branch, original_url)) = &resolved_git {
             cmd::InstallSourceMetadata {
