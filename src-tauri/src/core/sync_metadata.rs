@@ -78,15 +78,20 @@ pub fn has_complete_skill_snapshot() -> bool {
 
 #[allow(dead_code)]
 pub fn write_all_from_db(store: &SkillStore) -> Result<()> {
-    let _lock = RepoLock::acquire("write sync metadata")?;
+    // Foreground wait: this runs at startup and from CLI preset/enable
+    // commands, which must succeed (startup aborts on error), not skip.
+    let _lock = RepoLock::acquire_foreground("write sync metadata")?;
     write_all_from_db_unlocked(store)
 }
 
+/// Runs `f` while holding the central-repo lock. Callers are user-initiated
+/// operations (set tags, delete, preset edits, imports), so we wait out
+/// transient contention with background work instead of failing fast.
 pub(crate) fn with_repo_lock<T, F>(operation: &str, f: F) -> Result<T>
 where
     F: FnOnce() -> Result<T>,
 {
-    let _lock = RepoLock::acquire(operation)?;
+    let _lock = RepoLock::acquire_foreground(operation)?;
     f()
 }
 
@@ -101,7 +106,9 @@ pub(crate) fn write_all_from_db_unlocked(store: &SkillStore) -> Result<()> {
 
 #[allow(dead_code)]
 pub fn reindex_from_metadata(store: &SkillStore) -> Result<()> {
-    let _lock = RepoLock::acquire("reindex sync metadata")?;
+    // Foreground wait: runs at process startup (GUI and every CLI invocation),
+    // which aborts on error — better to wait out transient contention than fail.
+    let _lock = RepoLock::acquire_foreground("reindex sync metadata")?;
     reindex_from_metadata_unlocked(store)
 }
 
@@ -208,7 +215,9 @@ pub(crate) fn reindex_from_metadata_unlocked(store: &SkillStore) -> Result<()> {
 
 #[allow(dead_code)]
 pub fn ensure_skill_metadata(store: &SkillStore, skill_id: &str) -> Result<()> {
-    let _lock = RepoLock::acquire("write skill metadata")?;
+    // Foreground wait: the CLI `tag` commands flush metadata here after a DB
+    // write; they should ride out contention rather than fail fast.
+    let _lock = RepoLock::acquire_foreground("write skill metadata")?;
     ensure_skill_metadata_unlocked(store, skill_id)
 }
 

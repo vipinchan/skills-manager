@@ -168,7 +168,7 @@ fn detect_upstream_health(dir: &Path, has_remote: bool) -> String {
 /// Initialize a new git repository in the skills directory.
 #[allow(dead_code)]
 pub fn init_repo(skills_dir: &Path) -> Result<()> {
-    let _lock = RepoLock::acquire("git init")?;
+    let _lock = RepoLock::acquire_foreground("git init")?;
     init_repo_unlocked(skills_dir)
 }
 
@@ -195,7 +195,7 @@ pub(crate) fn init_repo_unlocked(skills_dir: &Path) -> Result<()> {
 
 /// Set (or update) the remote origin URL.
 pub fn set_remote(skills_dir: &Path, url: &str) -> Result<()> {
-    let _lock = RepoLock::acquire("git set remote")?;
+    let _lock = RepoLock::acquire_foreground("git set remote")?;
     set_remote_unlocked(skills_dir, url)
 }
 
@@ -240,7 +240,7 @@ pub(crate) fn set_remote_unlocked(skills_dir: &Path, url: &str) -> Result<()> {
 /// Stage all changes and create a commit.
 #[allow(dead_code)]
 pub fn commit_all(skills_dir: &Path, message: &str) -> Result<()> {
-    let _lock = RepoLock::acquire("git commit")?;
+    let _lock = RepoLock::acquire_foreground("git commit")?;
     commit_all_unlocked(skills_dir, message)
 }
 
@@ -264,7 +264,7 @@ pub(crate) fn commit_all_unlocked(skills_dir: &Path, message: &str) -> Result<()
 
 /// Push to the remote repository.
 pub fn push(skills_dir: &Path) -> Result<()> {
-    let _lock = RepoLock::acquire("git push")?;
+    let _lock = RepoLock::acquire_foreground("git push")?;
     push_unlocked(skills_dir)
 }
 
@@ -334,7 +334,7 @@ pub(crate) fn push_unlocked(skills_dir: &Path) -> Result<()> {
 /// Pull from the remote repository.
 #[allow(dead_code)]
 pub fn pull(skills_dir: &Path) -> Result<()> {
-    let _lock = RepoLock::acquire("git pull")?;
+    let _lock = RepoLock::acquire_foreground("git pull")?;
     pull_unlocked(skills_dir)
 }
 
@@ -363,7 +363,7 @@ pub(crate) fn pull_unlocked(skills_dir: &Path) -> Result<()> {
 
 /// Create an annotated snapshot tag on current HEAD.
 pub fn create_snapshot_tag(skills_dir: &Path) -> Result<String> {
-    let _lock = RepoLock::acquire("git snapshot")?;
+    let _lock = RepoLock::acquire_foreground("git snapshot")?;
     create_snapshot_tag_unlocked(skills_dir)
 }
 
@@ -454,7 +454,7 @@ pub fn list_snapshot_versions(
 /// Restore skills files to a snapshot tag by creating a new restore commit.
 #[allow(dead_code)]
 pub fn restore_snapshot_version(skills_dir: &Path, tag: &str) -> Result<()> {
-    let _lock = RepoLock::acquire("git restore snapshot")?;
+    let _lock = RepoLock::acquire_foreground("git restore snapshot")?;
     restore_snapshot_version_unlocked(skills_dir, tag)
 }
 
@@ -529,7 +529,7 @@ pub(crate) fn restore_snapshot_version_unlocked(skills_dir: &Path, tag: &str) ->
 /// The skills directory must be empty or non-existent.
 #[allow(dead_code)]
 pub fn clone_into(skills_dir: &Path, url: &str) -> Result<()> {
-    let _lock = RepoLock::acquire("git clone")?;
+    let _lock = RepoLock::acquire_foreground("git clone")?;
     clone_into_unlocked(skills_dir, url)
 }
 
@@ -542,7 +542,7 @@ pub fn clone_into(skills_dir: &Path, url: &str) -> Result<()> {
 /// skills-manager process attempting to populate the target between check
 /// and clone is serialized.
 pub fn clone_into_strict(skills_dir: &Path, url: &str) -> Result<()> {
-    let _lock = RepoLock::acquire("git clone")?;
+    let _lock = RepoLock::acquire_foreground("git clone")?;
     ensure_clean_clone_target(skills_dir)?;
     clone_into_unlocked(skills_dir, url)
 }
@@ -758,11 +758,14 @@ fn ensure_gitignore(skills_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Runs `f` while holding the central-repo lock. Used by the user-initiated
+/// backup commands (init/commit/pull/clone/reclone/restore), so we wait out
+/// transient contention with background work instead of failing fast.
 pub(crate) fn with_repo_lock<T, F>(operation: &str, f: F) -> Result<T>
 where
     F: FnOnce() -> Result<T>,
 {
-    let _lock = RepoLock::acquire(operation)?;
+    let _lock = RepoLock::acquire_foreground(operation)?;
     f()
 }
 
