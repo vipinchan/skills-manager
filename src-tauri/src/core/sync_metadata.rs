@@ -179,6 +179,12 @@ pub(crate) fn reindex_from_metadata_unlocked(store: &SkillStore) -> Result<()> {
         };
         let central_path = skill_dir.to_string_lossy().to_string();
 
+        let new_hash = super::content_hash::hash_directory(&skill_dir).ok();
+        let updated_at = match previous {
+            Some(prev) if prev.content_hash == new_hash => prev.updated_at,
+            _ => now,
+        };
+
         let record = SkillRecord {
             id: meta.skill_id.clone(),
             name,
@@ -191,10 +197,10 @@ pub(crate) fn reindex_from_metadata_unlocked(store: &SkillStore) -> Result<()> {
             source_revision: previous.and_then(|s| s.source_revision.clone()),
             remote_revision: previous.and_then(|s| s.remote_revision.clone()),
             central_path,
-            content_hash: super::content_hash::hash_directory(&skill_dir).ok(),
+            content_hash: new_hash,
             enabled: meta.enabled,
             created_at: previous.map(|s| s.created_at).unwrap_or(now),
-            updated_at: now,
+            updated_at,
             status: "ok".to_string(),
             update_status: previous
                 .map(|s| s.update_status.clone())
@@ -749,6 +755,58 @@ mod tests {
                 .remove("skill-1")
                 .unwrap(),
             vec!["tag-a".to_string(), "tag-b".to_string()]
+        );
+    }
+
+    #[test]
+    fn reindex_preserves_updated_at_when_content_unchanged() {
+        let repo = test_repo();
+        let skill_dir = write_skill_dir("stable-skill");
+
+        let mut record = sample_skill("skill-stable", &skill_dir);
+        record.updated_at = 1_000_000;
+        record.content_hash =
+            Some(super::super::content_hash::hash_directory(&skill_dir).unwrap());
+        repo.store.insert_skill(&record).unwrap();
+        write_all_from_db_unlocked(&repo.store).unwrap();
+
+        reindex_from_metadata_unlocked(&repo.store).unwrap();
+
+        let after = repo
+            .store
+            .get_skill_by_id("skill-stable")
+            .unwrap()
+            .expect("skill must still exist");
+        assert_eq!(
+            after.updated_at, 1_000_000,
+            "updated_at must not change when skill content is unchanged"
+        );
+    }
+
+    #[test]
+    fn reindex_updates_updated_at_when_content_changes() {
+        let repo = test_repo();
+        let skill_dir = write_skill_dir("changing-skill");
+
+        let mut record = sample_skill("skill-changing", &skill_dir);
+        record.updated_at = 1_000_000;
+        record.content_hash = Some("old-hash-before-change".to_string());
+        repo.store.insert_skill(&record).unwrap();
+        write_all_from_db_unlocked(&repo.store).unwrap();
+
+        // Modify the skill content so the hash changes
+        fs::write(skill_dir.join("extra.md"), "new content").unwrap();
+
+        reindex_from_metadata_unlocked(&repo.store).unwrap();
+
+        let after = repo
+            .store
+            .get_skill_by_id("skill-changing")
+            .unwrap()
+            .expect("skill must still exist");
+        assert_ne!(
+            after.updated_at, 1_000_000,
+            "updated_at must be refreshed when skill content changes"
         );
     }
 }
