@@ -94,11 +94,14 @@
       "pendingDesc": "本機變更：{{local}} · 遠端更新：{{remote}}。",
       "synced": "已備份",
       "syncedDesc": "最近可見快照：{{when}}。",
-      "noSnapshot": "暫無快照"
+      "noSnapshot": "暫無快照",
+      "failed": "備份失敗",
+      "pendingSkills": "有 {{count}} 個技能的變更尚未備份。"
     },
     "actions": {
       "backupNow": "立即備份",
-      "backupAgain": "再次備份"
+      "backupAgain": "再次備份",
+      "retry": "重試備份"
     },
     "connection": {
       "title": "連接",
@@ -122,19 +125,23 @@
         "secrets": "API key、token 和代理憑證",
         "local": "本機路徑、應用設定和本機 Agent 連接"
       },
-      "sizeHint": "超大的技能目錄會拖慢備份。規劃中的預設限制是單一技能目錄 100 MB，超限技能保留在本機。"
+      "sizeHint": "超大的技能目錄會拖慢備份。規劃中的預設限制是單一技能目錄 100 MB，超限技能保留在本機。",
+      "repoTooLarge": "備份總大小為 {{size}}——超過 1 GB 後備份可能變慢。",
+      "oversizedSkill": "「{{name}}」大小為 {{size}}——超過 100 MB 的技能可能拖慢備份。"
     },
     "disconnect": {
       "title": "斷開本機",
-      "desc": "只清除這台機器上的備份連接。本機技能和遠端備份資料都會保留。",
+      "desc": "僅移除本機的備份連線和儲存的存取憑證。本地技能與遠端備份資料都會保留。",
       "confirmTitle": "斷開備份？",
-      "confirmMessage": "這會移除本機儲存的遠端連接。本機技能和遠端倉庫都會保留。"
+      "confirmMessage": "將移除本機儲存的遠端連線和存取憑證。本地技能與遠端儲存庫不受影響。"
     },
     "summary": {
       "title": "技能庫概覽",
       "skills": "技能",
       "snapshots": "快照"
-    }
+    },
+    "credentialsMigrated": "偵測到備份位址中包含存取權杖，已將其轉移至系統鑰匙圈，不再出現在任何檔案中。",
+    "restoreSafetyPoint": "還原前的狀態已儲存為備份點 {{tag}}，可隨時從歷史中還原。"
   },
   "mySkills": {
     "title": "技能庫",

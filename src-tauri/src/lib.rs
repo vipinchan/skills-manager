@@ -868,6 +868,20 @@ pub fn run() {
                 step.elapsed().as_millis()
             );
 
+            // One-time (idempotent) security migration: move credentials
+            // embedded in the backup remote URL into the OS keychain so no
+            // token stays in `.git/config`. Best-effort in the background —
+            // offline machines retry on the next launch.
+            let store_for_cred_migration = store_for_setup.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                match commands::git_backup::migrate_embedded_credentials(&store_for_cred_migration)
+                {
+                    Ok(Some(_)) => log::info!("startup: migrated backup token to OS keychain"),
+                    Ok(None) => {}
+                    Err(e) => log::warn!("startup: backup credential migration skipped: {e:#}"),
+                }
+            });
+
             // Intercept window close — let frontend decide (close vs hide to tray)
             // When QUITTING is set, allow the close to proceed so the process fully exits.
             let step = Instant::now();
@@ -968,6 +982,9 @@ pub fn run() {
             commands::git_backup::git_backup_status,
             commands::git_backup::git_backup_init,
             commands::git_backup::git_backup_set_remote,
+            commands::git_backup::git_backup_sanitize_remote_url,
+            commands::git_backup::git_backup_migrate_credentials,
+            commands::git_backup::git_backup_size_report,
             commands::git_backup::git_backup_remove_remote,
             commands::git_backup::git_backup_commit,
             commands::git_backup::git_backup_push,

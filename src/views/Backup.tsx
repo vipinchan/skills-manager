@@ -22,7 +22,12 @@ import { GitSetupDialog } from "../components/GitSetupDialog";
 import { useApp } from "../context/AppContext";
 import { getErrorKind, getErrorMessage } from "../lib/error";
 import * as api from "../lib/tauri";
-import type { GitBackupStatus, GitBackupVersion, GitUpstreamHealth } from "../lib/tauri";
+import type {
+  GitBackupSizeReport,
+  GitBackupStatus,
+  GitBackupVersion,
+  GitUpstreamHealth,
+} from "../lib/tauri";
 
 type BackupMode =
   | "loading"
@@ -58,6 +63,12 @@ function formatDateTime(iso: string) {
   return date.toLocaleString();
 }
 
+function formatBytes(bytes: number) {
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(0)} MB`;
+  return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
+
 export function Backup() {
   const { t } = useTranslation();
   const { managedSkills, refreshManagedSkills } = useApp();
@@ -73,6 +84,8 @@ export function Backup() {
   const [restoreVersionTag, setRestoreVersionTag] = useState<string | null>(null);
   const [restoringVersionTag, setRestoringVersionTag] = useState<string | null>(null);
   const [disconnectConfirmOpen, setDisconnectConfirmOpen] = useState(false);
+  const [backupError, setBackupError] = useState<string | null>(null);
+  const [sizeReport, setSizeReport] = useState<GitBackupSizeReport | null>(null);
 
   const mapGitError = useCallback((error: unknown) => {
     const kind = getErrorKind(error);
@@ -166,15 +179,23 @@ export function Backup() {
 
   useEffect(() => {
     void (async () => {
+      // §3.7: move any token embedded in the remote URL into the OS keychain
+      // before the URL is read or displayed. Idempotent and best-effort —
+      // offline machines simply retry on the next visit.
+      const migrated = await api.gitBackupMigrateCredentials().catch(() => null);
+      if (migrated) {
+        toast.info(t("backup.credentialsMigrated"));
+      }
       const savedRemote = (await api.getSettings("git_backup_remote_url").catch(() => null))?.trim() || "";
       setRemoteInput(savedRemote);
       setRemoteConfig(savedRemote);
       const status = await refreshGitStatus(true);
       if (status?.is_repo) {
         await refreshVersions();
+        api.gitBackupSizeReport().then(setSizeReport).catch(() => setSizeReport(null));
       }
     })();
-  }, [refreshGitStatus, refreshVersions]);
+  }, [refreshGitStatus, refreshVersions, t]);
 
   useEffect(() => {
     if (gitStatus?.is_repo) {
@@ -200,6 +221,17 @@ export function Backup() {
   }, [gitStatus, remoteConfig]);
 
   const statusMeta = useMemo(() => {
+    // A failed backup stays visible (with a plain-language reason and a retry
+    // action) instead of vanishing with the toast — §3.4 three-state language.
+    if (backupError) {
+      return {
+        icon: XCircle,
+        title: t("backup.status.failed"),
+        description: backupError,
+        className: "border-red-500/40 bg-red-500/10",
+        iconClassName: "text-red-500",
+      };
+    }
     switch (mode) {
       case "loading":
         return {
@@ -230,10 +262,13 @@ export function Backup() {
         return {
           icon: Upload,
           title: t("backup.status.pending"),
-          description: t("backup.status.pendingDesc", {
-            local: Math.max(gitStatus?.ahead ?? 0, gitStatus?.has_changes ? 1 : 0),
-            remote: gitStatus?.behind ?? 0,
-          }),
+          description:
+            (gitStatus?.changed_skill_count ?? 0) > 0
+              ? t("backup.status.pendingSkills", { count: gitStatus?.changed_skill_count })
+              : t("backup.status.pendingDesc", {
+                  local: Math.max(gitStatus?.ahead ?? 0, gitStatus?.has_changes ? 1 : 0),
+                  remote: gitStatus?.behind ?? 0,
+                }),
           className: "border-amber-500/40 bg-amber-500/10",
           iconClassName: "text-amber-600 dark:text-amber-400",
         };
@@ -248,17 +283,21 @@ export function Backup() {
           iconClassName: "text-emerald-600 dark:text-emerald-400",
         };
     }
-  }, [gitStatus, mode, t]);
+  }, [backupError, gitStatus, mode, t]);
 
   const handleSaveRemote = async () => {
     const trimmed = remoteInput.trim();
     setLoading("save");
     try {
-      await api.setSettings("git_backup_remote_url", trimmed);
-      if (trimmed && gitStatus?.is_repo) {
-        await api.gitBackupSetRemote(trimmed);
+      // Never persist credentials embedded in the URL: they go to the OS
+      // keychain and only the sanitized URL is saved and shown (§3.7).
+      const effective = trimmed ? await api.gitBackupSanitizeRemoteUrl(trimmed) : "";
+      await api.setSettings("git_backup_remote_url", effective);
+      if (effective && gitStatus?.is_repo) {
+        await api.gitBackupSetRemote(effective);
       }
-      setRemoteConfig(trimmed);
+      setRemoteInput(effective);
+      setRemoteConfig(effective);
       toast.success(t("settings.gitConfigSaved"));
       await refreshGitStatus();
     } catch (error) {
@@ -360,8 +399,10 @@ export function Backup() {
       } else {
         toast.success(t("settings.gitUpToDate"));
       }
+      setBackupError(null);
       await Promise.all([refreshGitStatus(true), refreshVersions()]);
     } catch (error) {
+      setBackupError(mapGitError(error));
       if (isRecoverableSetupError(error)) {
         toast.error(mapGitError(error));
         const latest = await refreshGitStatus();
@@ -379,9 +420,9 @@ export function Backup() {
     if (!restoreVersionTag) return;
     setRestoringVersionTag(restoreVersionTag);
     try {
-      await api.gitBackupRestoreVersion(restoreVersionTag);
+      const safetyTag = await api.gitBackupRestoreVersion(restoreVersionTag);
       toast.success(t("mySkills.gitVersionRestoreSuccess", { tag: displaySnapshotLabel(restoreVersionTag) }));
-      toast.info(t("mySkills.gitVersionRestoreNeedSync"));
+      toast.info(t("backup.restoreSafetyPoint", { tag: displaySnapshotLabel(safetyTag) }));
       await Promise.all([refreshGitStatus(), refreshVersions(), refreshManagedSkills()]);
       setRestoreVersionTag(null);
     } catch (error) {
@@ -486,7 +527,11 @@ export function Backup() {
                     className="inline-flex h-8 items-center gap-1.5 rounded-[4px] border border-accent-border bg-accent-dark px-3 text-[13px] font-medium text-white transition-colors hover:bg-accent disabled:opacity-50"
                   >
                     {loading === "sync" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
-                    {mode === "up_to_date" ? t("backup.actions.backupAgain") : t("backup.actions.backupNow")}
+                    {backupError
+                      ? t("backup.actions.retry")
+                      : mode === "up_to_date"
+                        ? t("backup.actions.backupAgain")
+                        : t("backup.actions.backupNow")}
                   </button>
                 )}
               </div>
@@ -598,9 +643,22 @@ export function Backup() {
                 </div>
               ))}
             </div>
-            <div className="mt-3 rounded-[6px] border border-border-subtle bg-bg-secondary px-3 py-2 text-[12px] leading-5 text-muted">
-              {t("backup.scope.sizeHint")}
-            </div>
+            {sizeReport && (sizeReport.oversized.length > 0 || sizeReport.total_bytes > sizeReport.repo_warn_bytes) ? (
+              <div className="mt-3 space-y-1 rounded-[6px] border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[12px] leading-5 text-amber-700 dark:text-amber-300">
+                {sizeReport.total_bytes > sizeReport.repo_warn_bytes && (
+                  <div>{t("backup.scope.repoTooLarge", { size: formatBytes(sizeReport.total_bytes) })}</div>
+                )}
+                {sizeReport.oversized.map((skill) => (
+                  <div key={skill.name}>
+                    {t("backup.scope.oversizedSkill", { name: skill.name, size: formatBytes(skill.bytes) })}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="mt-3 rounded-[6px] border border-border-subtle bg-bg-secondary px-3 py-2 text-[12px] leading-5 text-muted">
+                {t("backup.scope.sizeHint")}
+              </div>
+            )}
           </section>
 
           <section className="app-panel p-4">

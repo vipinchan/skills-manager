@@ -94,11 +94,14 @@
       "pendingDesc": "Local changes: {{local}} · remote updates: {{remote}}.",
       "synced": "Backed up",
       "syncedDesc": "Latest visible snapshot: {{when}}.",
-      "noSnapshot": "no snapshot yet"
+      "noSnapshot": "no snapshot yet",
+      "failed": "Backup failed",
+      "pendingSkills": "{{count}} skill(s) have changes not yet backed up."
     },
     "actions": {
       "backupNow": "Back Up Now",
-      "backupAgain": "Back Up Again"
+      "backupAgain": "Back Up Again",
+      "retry": "Retry Backup"
     },
     "connection": {
       "title": "Connection",
@@ -122,19 +125,23 @@
         "secrets": "API keys, tokens, and proxy credentials",
         "local": "Machine-specific paths, app settings, and local agent setup"
       },
-      "sizeHint": "Very large skill folders may make backups slow. The planned default limit is 100 MB per skill folder, with oversized skills kept local."
+      "sizeHint": "Very large skill folders may make backups slow. The planned default limit is 100 MB per skill folder, with oversized skills kept local.",
+      "repoTooLarge": "Backup is {{size}} in total — past 1 GB backups may get slow.",
+      "oversizedSkill": "\"{{name}}\" is {{size}} — skills over 100 MB may make backups slow."
     },
     "disconnect": {
       "title": "Disconnect This Machine",
-      "desc": "Removes the backup connection from this machine only. Local skills and remote backup data are kept.",
+      "desc": "Removes the backup connection and the access credential saved on this machine only. Local skills and remote backup data are kept.",
       "confirmTitle": "Disconnect backup?",
-      "confirmMessage": "This removes the saved remote connection from this machine. Your local skills and remote repository will remain."
+      "confirmMessage": "This removes the saved remote connection and this machine's access credential. Your local skills and remote repository will remain."
     },
     "summary": {
       "title": "Library Summary",
       "skills": "Skills",
       "snapshots": "Snapshots"
-    }
+    },
+    "credentialsMigrated": "The access token found in your backup URL was moved to the system keychain. It no longer appears in any file.",
+    "restoreSafetyPoint": "Your previous state was saved as snapshot {{tag}} — you can restore it from the history at any time."
   },
   "mySkills": {
     "title": "Library",

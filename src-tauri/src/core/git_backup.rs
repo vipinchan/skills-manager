@@ -3,6 +3,7 @@ use chrono::Utc;
 use std::path::Path;
 use std::process::Command;
 
+use super::git_credentials;
 use super::repo_lock::RepoLock;
 
 /// Create a `Command` for git that hides the console window on Windows.
@@ -27,6 +28,10 @@ pub struct GitBackupStatus {
     pub branch: Option<String>,
     /// Whether there are uncommitted changes
     pub has_changes: bool,
+    /// Number of distinct top-level skill directories with uncommitted changes.
+    /// Drives the "N skills have unbacked changes" status copy; 0 when only
+    /// metadata or root files changed.
+    pub changed_skill_count: u32,
     /// Number of commits ahead of remote
     pub ahead: u32,
     /// Number of commits behind remote
@@ -68,8 +73,23 @@ pub fn fetch_remote(skills_dir: &Path) -> Result<()> {
 
     let branch = run_git(skills_dir, &["rev-parse", "--abbrev-ref", "HEAD"])
         .unwrap_or_else(|_| "main".to_string());
-    let _ = run_git(skills_dir, &["fetch", "--quiet", "origin", &branch]);
+    let env = remote_credential_env(skills_dir);
+    let _ = run_git_env(skills_dir, &["fetch", "--quiet", "origin", &branch], &env);
     Ok(())
+}
+
+/// The raw (unredacted) origin URL, for credential lookup and rewriting.
+/// Never log or surface this value directly — it may embed a token on
+/// not-yet-migrated repos.
+pub(crate) fn raw_remote_url(skills_dir: &Path) -> Option<String> {
+    run_git(skills_dir, &["remote", "get-url", "origin"]).ok()
+}
+
+/// Credential-injection environment for git subprocesses talking to origin.
+fn remote_credential_env(skills_dir: &Path) -> Vec<(String, String)> {
+    raw_remote_url(skills_dir)
+        .map(|url| git_credentials::credential_env_for_url(&url))
+        .unwrap_or_default()
 }
 
 /// Get the current git status of the skills directory.
@@ -80,6 +100,7 @@ pub fn get_status(skills_dir: &Path) -> Result<GitBackupStatus> {
             remote_url: None,
             branch: None,
             has_changes: false,
+            changed_skill_count: 0,
             ahead: 0,
             behind: 0,
             last_commit: None,
@@ -96,9 +117,9 @@ pub fn get_status(skills_dir: &Path) -> Result<GitBackupStatus> {
 
     let branch = run_git(skills_dir, &["rev-parse", "--abbrev-ref", "HEAD"]).ok();
 
-    let has_changes = run_git(skills_dir, &["status", "--porcelain"])
-        .map(|s| !s.is_empty())
-        .unwrap_or(false);
+    let porcelain = run_git(skills_dir, &["status", "--porcelain"]).unwrap_or_default();
+    let has_changes = !porcelain.is_empty();
+    let changed_skill_count = count_changed_top_dirs(&porcelain);
 
     let (ahead, behind) = get_ahead_behind(skills_dir).unwrap_or((0, 0));
 
@@ -137,6 +158,7 @@ pub fn get_status(skills_dir: &Path) -> Result<GitBackupStatus> {
         remote_url,
         branch,
         has_changes,
+        changed_skill_count,
         ahead,
         behind,
         last_commit,
@@ -210,7 +232,8 @@ pub(crate) fn set_remote_unlocked(skills_dir: &Path, url: &str) -> Result<()> {
     }
 
     // Fetch remote to set up tracking
-    if let Err(e) = run_git(skills_dir, &["fetch", "origin"]) {
+    let env = remote_credential_env(skills_dir);
+    if let Err(e) = run_git_env(skills_dir, &["fetch", "origin"], &env) {
         log::warn!("git set_remote: initial fetch failed (continuing): {e}");
     }
 
@@ -235,6 +258,23 @@ pub(crate) fn set_remote_unlocked(skills_dir: &Path, url: &str) -> Result<()> {
     log::info!("git set_remote: origin configured on branch {branch}, upstream_tracking={upstream_tracking}");
 
     Ok(())
+}
+
+/// Rewrite the origin URL without fetching or touching upstream tracking.
+/// Used by credential migration, which controls the verify step separately.
+pub(crate) fn set_remote_url_only(skills_dir: &Path, url: &str) -> Result<()> {
+    ensure_repo(skills_dir)?;
+    if run_git(skills_dir, &["remote", "get-url", "origin"]).is_ok() {
+        run_git_checked(skills_dir, &["remote", "set-url", "origin", url])
+    } else {
+        run_git_checked(skills_dir, &["remote", "add", "origin", url])
+    }
+}
+
+/// Cheap network round-trip proving we can authenticate against origin.
+pub(crate) fn verify_remote_auth(skills_dir: &Path) -> Result<()> {
+    let env = remote_credential_env(skills_dir);
+    run_git_env(skills_dir, &["ls-remote", "--heads", "origin"], &env).map(|_| ())
 }
 
 /// Remove the remote origin. Idempotent: succeeds when the repo or the
@@ -292,11 +332,13 @@ pub(crate) fn push_unlocked(skills_dir: &Path) -> Result<()> {
         .unwrap_or_else(|_| "main".to_string());
     log::info!("git push: starting on branch {branch}");
 
+    let env = remote_credential_env(skills_dir);
+
     // Push branch first; if no upstream, set it.
-    let result = run_git(skills_dir, &["push"]);
+    let result = run_git_env(skills_dir, &["push"], &env);
     if result.is_err() {
         log::info!("git push: no upstream tracking, retrying with -u origin {branch}");
-        run_git_checked(skills_dir, &["push", "-u", "origin", &branch])?;
+        run_git_env_checked(skills_dir, &["push", "-u", "origin", &branch], &env)?;
     }
 
     // Snapshot tags are lightweight (by design), so `--follow-tags` will not include them.
@@ -309,9 +351,10 @@ pub(crate) fn push_unlocked(skills_dir: &Path) -> Result<()> {
         .collect();
 
     if !local_snapshot_tags.is_empty() {
-        let remote_snapshot_tags_raw = run_git(
+        let remote_snapshot_tags_raw = run_git_env(
             skills_dir,
             &["ls-remote", "--tags", "--refs", "origin", "sm-v-*"],
+            &env,
         )
         .unwrap_or_default();
 
@@ -332,6 +375,7 @@ pub(crate) fn push_unlocked(skills_dir: &Path) -> Result<()> {
             let mut cmd = git_command();
             cmd.arg("-C").arg(skills_dir).arg("push").arg("origin");
             cmd.args(&missing_tag_refs);
+            cmd.envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
             let pushed = missing_tag_refs.len();
             let output = cmd.output().context("Failed to run git command")?;
             if !output.status.success() {
@@ -362,7 +406,8 @@ pub(crate) fn pull_unlocked(skills_dir: &Path) -> Result<()> {
         .unwrap_or_else(|_| "main".to_string());
     log::info!("git pull: fetch + merge origin/{branch}");
 
-    run_git_checked(skills_dir, &["fetch", "origin", &branch])?;
+    let env = remote_credential_env(skills_dir);
+    run_git_env_checked(skills_dir, &["fetch", "origin", &branch], &env)?;
     if let Err(e) = run_git(skills_dir, &["merge", &format!("origin/{branch}")]) {
         // A failed merge — almost always a content conflict on a SKILL.md body
         // edited on two machines — leaves the working tree conflicted with
@@ -469,13 +514,14 @@ pub fn list_snapshot_versions(
 }
 
 /// Restore skills files to a snapshot tag by creating a new restore commit.
+/// Returns the safety-point tag capturing the pre-restore state.
 #[allow(dead_code)]
-pub fn restore_snapshot_version(skills_dir: &Path, tag: &str) -> Result<()> {
+pub fn restore_snapshot_version(skills_dir: &Path, tag: &str) -> Result<String> {
     let _lock = RepoLock::acquire_foreground("git restore snapshot")?;
     restore_snapshot_version_unlocked(skills_dir, tag)
 }
 
-pub(crate) fn restore_snapshot_version_unlocked(skills_dir: &Path, tag: &str) -> Result<()> {
+pub(crate) fn restore_snapshot_version_unlocked(skills_dir: &Path, tag: &str) -> Result<String> {
     ensure_repo(skills_dir)?;
 
     if !tag.starts_with("sm-v-") {
@@ -486,21 +532,18 @@ pub(crate) fn restore_snapshot_version_unlocked(skills_dir: &Path, tag: &str) ->
         &["rev-parse", "-q", "--verify", &format!("refs/tags/{tag}")],
     )?;
 
-    let status = run_git(skills_dir, &["status", "--porcelain"])?;
-    if !status.is_empty() {
-        anyhow::bail!("Working tree has uncommitted changes. Sync or commit before restore.");
-    }
-
     log::info!("git restore: switching skills library to {tag}");
 
-    // Keep a restore point before we mutate the working tree.
-    let head_short = run_git(skills_dir, &["rev-parse", "--short", "HEAD"])?;
-    let restore_point = format!(
-        "sm-restore-point-{}-{}",
-        Utc::now().format("%Y%m%d-%H%M%S"),
-        head_short
-    );
-    run_git_checked(skills_dir, &["tag", &restore_point])?;
+    // Safety point first (§3.5): the pre-restore state — including any
+    // uncommitted edits — becomes a user-visible snapshot the user can return
+    // to from the backup history. This is what makes restore always undoable.
+    let status = run_git(skills_dir, &["status", "--porcelain"])?;
+    if !status.is_empty() {
+        ensure_gitignore(skills_dir)?;
+        run_git_checked(skills_dir, &["add", "-A"])?;
+        run_git_checked(skills_dir, &["commit", "-m", "backup before restore"])?;
+    }
+    let safety_tag = create_snapshot_tag_unlocked(skills_dir)?;
 
     let restore_result: Result<()> = (|| {
         // Align working tree + index to snapshot tree exactly (including deletions),
@@ -521,21 +564,14 @@ pub(crate) fn restore_snapshot_version_unlocked(skills_dir: &Path, tag: &str) ->
         Ok(())
     })();
 
-    // Always clean up the restore-point tag, regardless of outcome.
-    let cleanup = || {
-        let _ = run_git(skills_dir, &["tag", "-d", &restore_point]);
-    };
-
     match restore_result {
         Ok(()) => {
-            cleanup();
-            log::info!("git restore: completed restore to {tag}");
-            Ok(())
+            log::info!("git restore: completed restore to {tag} (safety point {safety_tag})");
+            Ok(safety_tag)
         }
         Err(err) => {
-            // Best-effort rollback to pre-restore HEAD.
-            let _ = run_git_checked(skills_dir, &["read-tree", "--reset", "-u", &restore_point]);
-            cleanup();
+            // Best-effort rollback to the safety point (pre-restore HEAD).
+            let _ = run_git_checked(skills_dir, &["read-tree", "--reset", "-u", &safety_tag]);
             Err(err)
                 .context("Restore failed after mutating working tree; attempted automatic rollback")
         }
@@ -684,10 +720,12 @@ pub(crate) fn clone_into_unlocked(skills_dir: &Path, url: &str) -> Result<()> {
     );
 
     // Clone
+    let env = git_credentials::credential_env_for_url(url);
     let output = git_command()
         .arg("clone")
         .arg(url)
         .arg(skills_dir)
+        .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .output();
@@ -730,6 +768,108 @@ pub(crate) fn clone_into_unlocked(skills_dir: &Path, url: &str) -> Result<()> {
             }
         }
     }
+}
+
+/// Count distinct top-level directories touched by a `git status --porcelain`
+/// output, skipping dot-entries (`.skills-manager` metadata, `.gitignore`).
+/// This approximates "how many skills have unbacked changes" for the status
+/// copy without needing the DB.
+fn count_changed_top_dirs(porcelain: &str) -> u32 {
+    let mut dirs = std::collections::HashSet::new();
+    for line in porcelain.lines() {
+        if line.len() <= 3 {
+            continue;
+        }
+        // Format: "XY path" or "XY old -> new" (rename); count the new path.
+        let mut path = &line[3..];
+        if let Some((_, renamed)) = path.split_once(" -> ") {
+            path = renamed;
+        }
+        let path = path.trim().trim_matches('"');
+        let top = path.split('/').next().unwrap_or_default();
+        if top.is_empty() || top.starts_with('.') {
+            continue;
+        }
+        dirs.insert(top.to_string());
+    }
+    dirs.len() as u32
+}
+
+/// Size thresholds from the backup redesign (§3.6): warn on any single skill
+/// directory above 100 MB and on a repository above 1 GB.
+pub const SKILL_SIZE_LIMIT_BYTES: u64 = 100 * 1024 * 1024;
+pub const REPO_SIZE_WARN_BYTES: u64 = 1024 * 1024 * 1024;
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OversizedSkill {
+    pub name: String,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BackupSizeReport {
+    /// Total size of backed-up content (working tree, `.git` excluded).
+    pub total_bytes: u64,
+    /// Skill directories above `skill_limit_bytes`.
+    pub oversized: Vec<OversizedSkill>,
+    pub skill_limit_bytes: u64,
+    pub repo_warn_bytes: u64,
+}
+
+/// Scan the skills directory for backup-size problems (§3.6). Read-only.
+pub fn size_report(skills_dir: &Path) -> Result<BackupSizeReport> {
+    let mut total_bytes: u64 = 0;
+    let mut oversized = Vec::new();
+
+    if skills_dir.exists() {
+        let mut it = walkdir::WalkDir::new(skills_dir)
+            .min_depth(1)
+            .max_depth(6)
+            .into_iter()
+            .filter_entry(|e| e.file_name().to_string_lossy() != ".git");
+        while let Some(entry) = it.next() {
+            let Ok(entry) = entry else { continue };
+            let path = entry.path();
+            if entry.file_type().is_file() {
+                total_bytes += entry.metadata().map(|m| m.len()).unwrap_or(0);
+                continue;
+            }
+            if entry.file_type().is_dir() && super::skill_metadata::is_valid_skill_dir(path) {
+                let bytes = dir_size(path);
+                total_bytes += bytes;
+                if bytes > SKILL_SIZE_LIMIT_BYTES {
+                    oversized.push(OversizedSkill {
+                        name: path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default(),
+                        bytes,
+                    });
+                }
+                // The whole subtree is accounted for; don't double-count files
+                // or nested dirs inside this skill.
+                it.skip_current_dir();
+            }
+        }
+    }
+
+    oversized.sort_by(|a, b| b.bytes.cmp(&a.bytes));
+    Ok(BackupSizeReport {
+        total_bytes,
+        oversized,
+        skill_limit_bytes: SKILL_SIZE_LIMIT_BYTES,
+        repo_warn_bytes: REPO_SIZE_WARN_BYTES,
+    })
+}
+
+fn dir_size(dir: &Path) -> u64 {
+    walkdir::WalkDir::new(dir)
+        .into_iter()
+        .flatten()
+        .filter(|e| e.file_type().is_file())
+        .filter_map(|e| e.metadata().ok())
+        .map(|m| m.len())
+        .sum()
 }
 
 // ── Helpers ──
@@ -787,10 +927,15 @@ where
 }
 
 fn run_git(dir: &Path, args: &[&str]) -> Result<String> {
+    run_git_env(dir, args, &[])
+}
+
+fn run_git_env(dir: &Path, args: &[&str], envs: &[(String, String)]) -> Result<String> {
     let output = git_command()
         .arg("-C")
         .arg(dir)
         .args(args)
+        .envs(envs.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .output()
         .context("Failed to run git command")?;
 
@@ -819,7 +964,11 @@ fn run_git(dir: &Path, args: &[&str]) -> Result<String> {
 }
 
 fn run_git_checked(dir: &Path, args: &[&str]) -> Result<()> {
-    if let Err(e) = run_git(dir, args) {
+    run_git_env_checked(dir, args, &[])
+}
+
+fn run_git_env_checked(dir: &Path, args: &[&str], envs: &[(String, String)]) -> Result<()> {
+    if let Err(e) = run_git_env(dir, args, envs) {
         // Single chokepoint for genuine git failures: every aborting step
         // (commit, push -u, fetch+merge, tag, read-tree, …) goes through here,
         // so this is where "sync silently failed" becomes visible in the log.
@@ -1054,6 +1203,71 @@ mod tests {
             parse_restored_from_tag_message(msg).as_deref(),
             Some("sm-v-20260318-153012-abc1234")
         );
+    }
+
+    // ── count_changed_top_dirs ──
+
+    #[test]
+    fn count_changed_top_dirs_counts_unique_skill_dirs() {
+        let porcelain = " M skill-a/SKILL.md\n?? skill-a/notes.md\n M skill-b/SKILL.md\n";
+        assert_eq!(count_changed_top_dirs(porcelain), 2);
+    }
+
+    #[test]
+    fn count_changed_top_dirs_skips_metadata_and_root_dotfiles() {
+        let porcelain = " M .skills-manager/skills/x.json\n M .gitignore\n";
+        assert_eq!(count_changed_top_dirs(porcelain), 0);
+    }
+
+    #[test]
+    fn count_changed_top_dirs_follows_renames() {
+        let porcelain = "R  old-name/SKILL.md -> new-name/SKILL.md\n";
+        assert_eq!(count_changed_top_dirs(porcelain), 1);
+    }
+
+    #[test]
+    fn count_changed_top_dirs_empty() {
+        assert_eq!(count_changed_top_dirs(""), 0);
+    }
+
+    // ── restore safety point ──
+
+    #[test]
+    fn restore_creates_safety_point_capturing_dirty_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let git = |args: &[&str]| {
+            let out = Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
+            assert!(out.status.success(), "git {args:?} failed: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Test"]);
+
+        std::fs::create_dir_all(dir.join("skill-a")).unwrap();
+        std::fs::write(dir.join("skill-a/SKILL.md"), "v1").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-m", "v1"]);
+        let old_tag = create_snapshot_tag_unlocked(dir).unwrap();
+
+        std::fs::write(dir.join("skill-a/SKILL.md"), "v2").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-m", "v2"]);
+        // Uncommitted edit on top — must survive inside the safety point.
+        std::fs::write(dir.join("skill-a/SKILL.md"), "v3-dirty").unwrap();
+
+        let safety_tag = restore_snapshot_version_unlocked(dir, &old_tag).unwrap();
+
+        // Working tree is back at v1.
+        assert_eq!(std::fs::read_to_string(dir.join("skill-a/SKILL.md")).unwrap(), "v1");
+        // The safety point is a persistent user-visible snapshot of the
+        // pre-restore state, including the dirty edit.
+        assert!(safety_tag.starts_with("sm-v-"));
+        let captured = run_git(dir, &["show", &format!("{safety_tag}:skill-a/SKILL.md")]).unwrap();
+        assert_eq!(captured, "v3-dirty");
+        // And it shows up in the snapshot history for one-click undo.
+        let versions = list_snapshot_versions(dir, None).unwrap();
+        assert!(versions.iter().any(|v| v.tag == safety_tag));
     }
 
     // ── ensure_clean_clone_target ──

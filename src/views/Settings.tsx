@@ -688,7 +688,12 @@ export function Settings() {
   const handleSaveGitRemote = async () => {
     setGitRemoteSaving(true);
     try {
-      await api.setSettings("git_backup_remote_url", gitRemoteInput.trim());
+      // Credentials embedded in the URL go to the OS keychain; only the
+      // sanitized URL is persisted (backup redesign §3.7).
+      const trimmed = gitRemoteInput.trim();
+      const effective = trimmed ? await api.gitBackupSanitizeRemoteUrl(trimmed) : "";
+      await api.setSettings("git_backup_remote_url", effective);
+      setGitRemoteInput(effective);
       toast.success(t("settings.gitConfigSaved"));
     } catch {
       toast.error(t("common.error"));

@@ -499,6 +499,7 @@ export interface GitBackupStatus {
   remote_url: string | null;
   branch: string | null;
   has_changes: boolean;
+  changed_skill_count: number;
   ahead: number;
   behind: number;
   last_commit: string | null;
@@ -515,6 +516,13 @@ export interface GitBackupVersion {
   committed_at: string;
 }
 
+export interface GitBackupSizeReport {
+  total_bytes: number;
+  oversized: { name: string; bytes: number }[];
+  skill_limit_bytes: number;
+  repo_warn_bytes: number;
+}
+
 export const gitBackupStatus = () =>
   invoke<GitBackupStatus>("git_backup_status");
 
@@ -522,8 +530,20 @@ export const gitBackupFetch = () => invoke<void>("git_backup_fetch");
 
 export const gitBackupInit = () => invoke<void>("git_backup_init");
 
+/** Returns the sanitized URL actually configured (credentials moved to the OS keychain). */
 export const gitBackupSetRemote = (url: string) =>
-  invoke<void>("git_backup_set_remote", { url });
+  invoke<string>("git_backup_set_remote", { url });
+
+/** Strip embedded credentials into the OS keychain; returns the URL safe to persist. */
+export const gitBackupSanitizeRemoteUrl = (url: string) =>
+  invoke<string>("git_backup_sanitize_remote_url", { url });
+
+/** Migrate token-in-URL remotes to the OS keychain. Returns the sanitized URL if migrated. */
+export const gitBackupMigrateCredentials = () =>
+  invoke<string | null>("git_backup_migrate_credentials");
+
+export const gitBackupSizeReport = () =>
+  invoke<GitBackupSizeReport>("git_backup_size_report");
 
 export const gitBackupRemoveRemote = () =>
   invoke<void>("git_backup_remove_remote");
@@ -549,8 +569,9 @@ export const gitBackupListVersions = (limit?: number) =>
     limit: typeof limit === "number" ? limit : null,
   });
 
+/** Returns the safety-point tag that captured the pre-restore state. */
 export const gitBackupRestoreVersion = (tag: string) =>
-  invoke<void>("git_backup_restore_version", { tag });
+  invoke<string>("git_backup_restore_version", { tag });
 
 // ── Presets ──
 

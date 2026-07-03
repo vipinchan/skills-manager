@@ -1,6 +1,9 @@
 use crate::core::{
-    central_repo, error::AppError, git_backup, git_fetcher, skill_metadata, sync_metadata,
+    central_repo, error::AppError, git_backup, git_credentials, git_fetcher, skill_metadata,
+    sync_metadata,
 };
+use anyhow::Context;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::State;
@@ -70,32 +73,83 @@ pub async fn git_backup_init(store: State<'_, Arc<SkillStore>>) -> Result<(), Ap
     .await?
 }
 
+/// Move credentials embedded in `url` into the OS keychain and return the
+/// sanitized URL. Falls back to the original URL when the keychain is
+/// unavailable (e.g. Linux without a secret service) so backup keeps working
+/// with the legacy embedded-credential behavior.
+fn sanitize_url_to_keychain(url: &str) -> String {
+    let Some((cred, sanitized)) = git_credentials::split_credentials_from_url(url) else {
+        return url.to_string();
+    };
+    let Some(host) = git_credentials::https_host(&sanitized) else {
+        return url.to_string();
+    };
+    match git_credentials::store_credential(&host, &cred) {
+        Ok(()) => sanitized,
+        Err(e) => {
+            log::warn!(
+                "git credentials: keychain unavailable, keeping embedded credentials: {e:#}"
+            );
+            url.to_string()
+        }
+    }
+}
+
+/// Sanitize a remote URL before it is persisted anywhere: embedded
+/// credentials go to the OS keychain, the returned URL is what the frontend
+/// must save and display.
+#[tauri::command]
+pub async fn git_backup_sanitize_remote_url(url: String) -> Result<String, AppError> {
+    git_fetcher::validate_git_url(&url).map_err(AppError::git)?;
+    tokio::task::spawn_blocking(move || Ok(sanitize_url_to_keychain(url.trim())))
+        .await?
+}
+
 #[tauri::command]
 pub async fn git_backup_set_remote(
     store: State<'_, Arc<SkillStore>>,
     url: String,
-) -> Result<(), AppError> {
+) -> Result<String, AppError> {
     let _ = store;
     git_fetcher::validate_git_url(&url).map_err(AppError::git)?;
     let skills_dir = central_repo::skills_dir();
     tokio::task::spawn_blocking(move || {
-        git_backup::set_remote(&skills_dir, &url).map_err(AppError::classify_git_error)
+        let effective = sanitize_url_to_keychain(url.trim());
+        git_backup::set_remote(&skills_dir, &effective).map_err(AppError::classify_git_error)?;
+        Ok(effective)
     })
     .await?
 }
 
-/// Disconnect the local machine from the backup remote (#260): remove the
-/// git origin and clear the saved remote URL setting. Remote repository data
-/// and the local repo are kept.
+/// Disconnect the local machine from the backup remote (#260, §3.1 断开本机):
+/// remove the git origin, clear the saved remote URL setting, and delete the
+/// machine's stored access credential. Remote repository data and the local
+/// repo are kept; other devices are unaffected.
 #[tauri::command]
 pub async fn git_backup_remove_remote(store: State<'_, Arc<SkillStore>>) -> Result<(), AppError> {
     let store = store.inner().clone();
     let skills_dir = central_repo::skills_dir();
     tokio::task::spawn_blocking(move || {
+        // Collect credential hosts before the URLs are gone.
+        let mut hosts = std::collections::HashSet::new();
+        if let Some(url) = git_backup::raw_remote_url(&skills_dir) {
+            hosts.extend(git_credentials::https_host(&url));
+        }
+        if let Ok(Some(url)) = store.get_setting("git_backup_remote_url") {
+            hosts.extend(git_credentials::https_host(&url));
+        }
+
         git_backup::remove_remote(&skills_dir).map_err(AppError::git)?;
         store
             .set_setting("git_backup_remote_url", "")
-            .map_err(AppError::db)
+            .map_err(AppError::db)?;
+
+        for host in hosts {
+            if let Err(e) = git_credentials::delete_credential(&host) {
+                log::warn!("git disconnect: failed to delete keychain credential: {e:#}");
+            }
+        }
+        Ok(())
     })
     .await?
 }
@@ -150,8 +204,9 @@ pub async fn git_backup_clone(
     let store = store.inner().clone();
     let skills_dir = central_repo::skills_dir();
     tokio::task::spawn_blocking(move || {
+        let effective = sanitize_url_to_keychain(url.trim());
         git_backup::with_repo_lock("git clone", || {
-            git_backup::clone_into_unlocked(&skills_dir, &url)?;
+            git_backup::clone_into_unlocked(&skills_dir, &effective)?;
             reconcile_skills_index_unlocked(&store)
         })
         .map_err(AppError::classify_git_error)
@@ -171,8 +226,9 @@ pub async fn git_backup_reclone(
     let store = store.inner().clone();
     let skills_dir = central_repo::skills_dir();
     tokio::task::spawn_blocking(move || {
+        let effective = sanitize_url_to_keychain(url.trim());
         git_backup::with_repo_lock("git reclone", || {
-            git_backup::reclone_from_remote_unlocked(&skills_dir, &url)?;
+            git_backup::reclone_from_remote_unlocked(&skills_dir, &effective)?;
             reconcile_skills_index_unlocked(&store)
         })
         .map_err(AppError::classify_git_error)
@@ -206,22 +262,251 @@ pub async fn git_backup_list_versions(
     .await?
 }
 
+/// Restore a snapshot. Returns the safety-point tag that captured the
+/// pre-restore state, so the UI can tell the user the restore is undoable.
 #[tauri::command]
 pub async fn git_backup_restore_version(
     store: State<'_, Arc<SkillStore>>,
     tag: String,
-) -> Result<(), AppError> {
+) -> Result<String, AppError> {
     let store = store.inner().clone();
     let skills_dir = central_repo::skills_dir();
     tokio::task::spawn_blocking(move || {
         git_backup::with_repo_lock("git restore snapshot", || {
-            git_backup::restore_snapshot_version_unlocked(&skills_dir, &tag)?;
-            reconcile_skills_index_unlocked(&store)
+            let safety_tag = git_backup::restore_snapshot_version_unlocked(&skills_dir, &tag)?;
+            reconcile_skills_index_unlocked(&store)?;
+            Ok(safety_tag)
         })
-        .map_err(AppError::git)?;
-        Ok(())
+        .map_err(AppError::git)
     })
     .await?
+}
+
+#[tauri::command]
+pub async fn git_backup_size_report() -> Result<git_backup::BackupSizeReport, AppError> {
+    let skills_dir = central_repo::skills_dir();
+    tokio::task::spawn_blocking(move || git_backup::size_report(&skills_dir).map_err(AppError::io))
+        .await?
+}
+
+/// Migrate credentials embedded in the remote URL (`user:token@host`) into
+/// the OS keychain (§3.7). Rewrites `.git/config` and the saved setting to
+/// the credential-free URL, verifies authentication still works, and rolls
+/// everything back on any failure — no half-migrated state. Returns the
+/// sanitized URL when a migration happened, `None` when there was nothing to
+/// migrate.
+#[tauri::command]
+pub async fn git_backup_migrate_credentials(
+    store: State<'_, Arc<SkillStore>>,
+) -> Result<Option<String>, AppError> {
+    let store = store.inner().clone();
+    tokio::task::spawn_blocking(move || migrate_embedded_credentials(&store).map_err(AppError::git))
+        .await?
+}
+
+pub fn migrate_embedded_credentials(store: &SkillStore) -> anyhow::Result<Option<String>> {
+    let skills_dir = central_repo::skills_dir();
+    git_backup::with_repo_lock("git credential migration", || {
+        migrate_embedded_credentials_unlocked(store, &skills_dir)
+    })
+}
+
+fn migrate_embedded_credentials_unlocked(
+    store: &SkillStore,
+    skills_dir: &Path,
+) -> anyhow::Result<Option<String>> {
+    let has_embedded = |url: &String| git_credentials::split_credentials_from_url(url).is_some();
+
+    let config_url = if skills_dir.join(".git").exists() {
+        git_backup::raw_remote_url(skills_dir)
+    } else {
+        None
+    };
+    let setting_url = store
+        .get_setting("git_backup_remote_url")
+        .ok()
+        .flatten()
+        .filter(|s| !s.trim().is_empty());
+
+    let config_had_creds = config_url.as_ref().map(has_embedded).unwrap_or(false);
+    let source_url = if config_had_creds {
+        config_url.clone()
+    } else {
+        setting_url.clone().filter(has_embedded)
+    };
+    let Some(source_url) = source_url else {
+        return Ok(None);
+    };
+
+    let (cred, sanitized) = git_credentials::split_credentials_from_url(&source_url)
+        .expect("source_url was checked to carry credentials");
+    let host = git_credentials::https_host(&sanitized)
+        .context("Cannot determine host for credential migration")?;
+
+    // Step 1: token into the keychain. Nothing on disk has changed yet, so a
+    // failure here leaves everything as it was.
+    git_credentials::store_credential(&host, &cred)?;
+
+    // Step 2: rewrite `.git/config` to the credential-free URL, then verify
+    // that authentication through the keychain still works. Any failure rolls
+    // back to the exact previous state.
+    if config_had_creds {
+        if let Err(e) = git_backup::set_remote_url_only(skills_dir, &sanitized) {
+            let _ = git_credentials::delete_credential(&host);
+            return Err(e);
+        }
+        if let Err(e) = git_backup::verify_remote_auth(skills_dir) {
+            let _ = git_backup::set_remote_url_only(skills_dir, &source_url);
+            let _ = git_credentials::delete_credential(&host);
+            return Err(e.context(
+                "Credential migration verification failed; previous configuration restored",
+            ));
+        }
+    }
+
+    // Step 3: rewrite the saved setting.
+    if setting_url.as_deref() != Some(sanitized.as_str()) {
+        if let Err(e) = store.set_setting("git_backup_remote_url", &sanitized) {
+            if config_had_creds {
+                let _ = git_backup::set_remote_url_only(skills_dir, &source_url);
+            }
+            let _ = git_credentials::delete_credential(&host);
+            return Err(e);
+        }
+    }
+
+    log::info!("git credentials: migrated embedded token to OS keychain for {host}");
+    Ok(Some(sanitized))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TestEnv {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        _tmp: tempfile::TempDir,
+        store: SkillStore,
+        skills_dir: std::path::PathBuf,
+    }
+
+    impl Drop for TestEnv {
+        fn drop(&mut self) {
+            central_repo::set_test_base_dir_override(None);
+        }
+    }
+
+    /// Isolated base dir (askpass script, skills repo, DB) + mock keyring.
+    fn test_env() -> TestEnv {
+        git_credentials::use_mock_keyring();
+        let lock = central_repo::test_base_dir_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("base");
+        central_repo::set_test_base_dir_override(Some(base.clone()));
+        let skills_dir = central_repo::skills_dir();
+        std::fs::create_dir_all(&skills_dir).unwrap();
+        let store = SkillStore::new(&base.join("test.db")).unwrap();
+        TestEnv {
+            _lock: lock,
+            _tmp: tmp,
+            store,
+            skills_dir,
+        }
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn origin_url(dir: &Path) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["remote", "get-url", "origin"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn migrate_is_noop_without_embedded_credentials() {
+        let env = test_env();
+        git(&env.skills_dir, &["init", "-b", "main"]);
+        git(
+            &env.skills_dir,
+            &["remote", "add", "origin", "https://github.com/acme/repo.git"],
+        );
+        env.store
+            .set_setting("git_backup_remote_url", "https://github.com/acme/repo.git")
+            .unwrap();
+
+        let result =
+            migrate_embedded_credentials_unlocked(&env.store, &env.skills_dir).unwrap();
+        assert_eq!(result, None);
+        assert_eq!(origin_url(&env.skills_dir), "https://github.com/acme/repo.git");
+    }
+
+    #[test]
+    fn migrate_sanitizes_setting_when_no_repo_exists() {
+        let env = test_env();
+        // Only the saved setting carries a token (repo not initialized yet):
+        // the token moves to the keychain and the setting is rewritten, with
+        // no network verification possible or needed.
+        env.store
+            .set_setting(
+                "git_backup_remote_url",
+                "https://user:tok@github.com/acme/repo.git",
+            )
+            .unwrap();
+
+        let result =
+            migrate_embedded_credentials_unlocked(&env.store, &env.skills_dir).unwrap();
+        assert_eq!(result.as_deref(), Some("https://github.com/acme/repo.git"));
+        assert_eq!(
+            env.store.get_setting("git_backup_remote_url").unwrap().as_deref(),
+            Some("https://github.com/acme/repo.git")
+        );
+    }
+
+    #[test]
+    fn migrate_rolls_back_config_and_setting_on_verify_failure() {
+        let env = test_env();
+        // Unreachable host: verification must fail after the config rewrite,
+        // and the rollback must restore the exact original state (§3.7 —
+        // no half-migrated state).
+        let token_url = "https://user:sometok@127.0.0.1:1/acme/repo.git";
+        git(&env.skills_dir, &["init", "-b", "main"]);
+        git(&env.skills_dir, &["remote", "add", "origin", token_url]);
+        env.store
+            .set_setting("git_backup_remote_url", token_url)
+            .unwrap();
+
+        let err = migrate_embedded_credentials_unlocked(&env.store, &env.skills_dir).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("verification failed"),
+            "unexpected error: {msg}"
+        );
+        assert!(
+            !msg.contains("sometok"),
+            "token must not leak into the error: {msg}"
+        );
+        assert_eq!(origin_url(&env.skills_dir), token_url);
+        assert_eq!(
+            env.store.get_setting("git_backup_remote_url").unwrap().as_deref(),
+            Some(token_url)
+        );
+    }
 }
 
 fn reconcile_skills_index_unlocked(store: &SkillStore) -> anyhow::Result<()> {
