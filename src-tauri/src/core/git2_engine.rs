@@ -215,6 +215,17 @@ mod tests {
     use super::*;
     use std::process::Command;
 
+    /// Platform-correct file URL: Windows paths need forward slashes and a
+    /// third slash before the drive letter (`file:///C:/...`).
+    fn file_url(path: &Path) -> String {
+        let s = path.display().to_string().replace('\\', "/");
+        if s.starts_with('/') {
+            format!("file://{s}")
+        } else {
+            format!("file:///{s}")
+        }
+    }
+
     fn git(dir: &Path, args: &[&str]) {
         let out = Command::new("git")
             .arg("-C")
@@ -261,7 +272,7 @@ mod tests {
             .unwrap()
             .status
             .success());
-        let url = format!("file://{}", remote.display());
+        let url = file_url(&remote);
 
         git(&work, &["init", "-b", "main"]);
         git(&work, &["remote", "add", "origin", &url]);
@@ -337,7 +348,7 @@ mod tests {
             .unwrap()
             .status
             .success());
-        let url = format!("file://{}", remote.display());
+        let url = file_url(&remote);
 
         git(&a, &["init", "-b", "main"]);
         git(&a, &["remote", "add", "origin", &url]);
