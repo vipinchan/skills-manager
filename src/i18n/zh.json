@@ -114,7 +114,8 @@
       "keepLocal": "保留本机",
       "useRemote": "使用远端",
       "keepBoth": "两个都保留",
-      "resolved": "冲突已解决——已保存安全快照 {{tag}}。"
+      "resolved": "冲突已解决——已保存安全快照 {{tag}}。",
+      "blockedBothDevices": "同一个技能在两台设备上都有未处理的冲突。请先在任意一台设备上解决它，再重新同步。"
     },
     "connection": {
       "title": "连接",

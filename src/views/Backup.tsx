@@ -424,47 +424,45 @@ export function Backup() {
         setRecoveryOpen(true);
         return;
       }
-      let committed = false;
-      if (status.has_changes) {
-        await api.gitBackupCommit(t("settings.gitCommitPlaceholder"));
-        committed = true;
-        status = await api.gitBackupStatus();
-      }
-      if (status.behind > 0) {
-        const summary = await api.gitBackupPull();
-        status = await api.gitBackupStatus();
-        if (summary.engine === "object" && !summary.legacy_fallback) {
-          // Object merge (merge-engine design §8): human-readable outcome.
-          if (summary.new_conflicts.length > 0) {
-            toast.warning(
-              t("backup.merge.newConflicts", { count: summary.new_conflicts.length }),
-              { duration: 10000 },
-            );
-          } else {
-            toast.success(t("backup.merge.applied", { count: summary.updated.length }));
-          }
-          if (summary.old_client_warning) {
-            toast.warning(summary.old_client_warning, { duration: 12000 });
-          }
-          void refreshPendingConflicts();
+      // One backend transaction: commit → merge → snapshot → push, retried
+      // internally when another device pushes concurrently (§9 并发收敛).
+      const outcome = await api.gitBackupSync(t("settings.gitCommitPlaceholder"));
+      const merge = outcome.merge;
+      if (merge && merge.engine === "object" && !merge.legacy_fallback) {
+        // Object merge (merge-engine design §8): human-readable outcome.
+        if (merge.new_conflicts.length > 0) {
+          toast.warning(
+            t("backup.merge.newConflicts", { count: merge.new_conflicts.length }),
+            { duration: 10000 },
+          );
         } else {
-          toast.success(t("settings.gitPullSuccess"));
+          toast.success(t("backup.merge.applied", { count: merge.updated.length }));
         }
+        if (merge.old_client_warning) {
+          toast.warning(merge.old_client_warning, { duration: 12000 });
+        }
+        void refreshPendingConflicts();
+      } else if (merge) {
+        toast.success(t("settings.gitPullSuccess"));
+      }
+      if (merge) {
         await refreshManagedSkills();
       }
-      const needsPush = committed || status.ahead > 0 || status.upstream_health === "no_upstream";
-      if (needsPush) {
-        const snapshotTag = await api.gitBackupCreateSnapshot();
-        await api.gitBackupPush();
-        toast.success(t("mySkills.gitSyncSuccessWithVersion", { tag: displaySnapshotLabel(snapshotTag) }));
-      } else {
+      if (outcome.pushed && outcome.snapshot_tag) {
+        toast.success(t("mySkills.gitSyncSuccessWithVersion", { tag: displaySnapshotLabel(outcome.snapshot_tag) }));
+      } else if (!merge) {
         toast.success(t("settings.gitUpToDate"));
       }
       setBackupError(null);
       await Promise.all([refreshGitStatus(true), refreshVersions()]);
     } catch (error) {
       setBackupError(mapGitError(error));
-      if (isRecoverableSetupError(error)) {
+      const message = getErrorMessage(error, "");
+      if (message.includes("pending on both devices")) {
+        // Object-merge block (§4 双侧声明): the fix is resolving the pending
+        // conflict on one device — reclone/recovery would be wrong advice.
+        toast.error(t("backup.conflicts.blockedBothDevices"), { duration: 12000 });
+      } else if (isRecoverableSetupError(error)) {
         toast.error(mapGitError(error));
         const latest = await refreshGitStatus();
         setRecoveryReason(isSyncConflictError(error) ? "conflict" : (latest?.upstream_health ?? "unrelated_histories"));

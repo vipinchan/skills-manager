@@ -394,6 +394,119 @@ pub async fn git_backup_pull(
     .await?
 }
 
+/// Outcome of a full sync transaction for the frontend.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SyncOutcome {
+    /// Local changes were committed as part of this sync.
+    pub committed: bool,
+    /// Merge result when a merge ran (None when nothing to pull).
+    pub merge: Option<merge::MergeSummary>,
+    pub pushed: bool,
+    /// Snapshot tag on the pushed state (None when nothing was pushed).
+    pub snapshot_tag: Option<String>,
+}
+
+/// Full backup sync as one transaction under a single repo lock (merge-engine
+/// design §9 并发收敛): commit → fetch/merge → snapshot → push, retrying the
+/// fetch/merge/push tail when another device pushes concurrently. Replaces
+/// the frontend-orchestrated commit/pull/push sequence, whose lock gaps let a
+/// benign race surface as a non-fast-forward "needs recovery" error.
+#[tauri::command]
+pub async fn git_backup_sync(
+    store: State<'_, Arc<SkillStore>>,
+    message: String,
+) -> Result<SyncOutcome, AppError> {
+    let store = store.inner().clone();
+    sync_engine_pref(&store);
+    let skills_dir = central_repo::skills_dir();
+    tokio::task::spawn_blocking(move || {
+        git_backup::with_repo_lock("git sync", || run_sync_blocking(&store, &skills_dir, &message))
+            .map_err(AppError::classify_git_error)
+    })
+    .await?
+}
+
+const SYNC_PUSH_ATTEMPTS: usize = 3;
+
+fn run_sync_blocking(
+    store: &SkillStore,
+    skills_dir: &Path,
+    message: &str,
+) -> anyhow::Result<SyncOutcome> {
+    apply_device_identity(store, skills_dir);
+
+    // Local changes first — they must be safe before any network step.
+    sync_metadata::write_all_from_db_unlocked(store)?;
+    let mut committed = false;
+    if git_backup::has_uncommitted_changes(skills_dir)? {
+        git_backup::commit_all_unlocked(skills_dir, message)?;
+        committed = true;
+    }
+
+    // Best-effort initial fetch: a missing remote branch (fresh remote) or a
+    // network failure must not block the local commit; push surfaces real
+    // connectivity errors below when there is something to push.
+    let branch = git_backup::current_branch(skills_dir);
+    if let Err(e) = git_backup::fetch_branch(skills_dir, &branch) {
+        log::info!("git sync: initial fetch failed (continuing): {e:#}");
+    }
+
+    let mut merge_summary: Option<merge::MergeSummary> = None;
+    let mut pushed = false;
+    let mut snapshot_tag: Option<String> = None;
+    for attempt in 0..SYNC_PUSH_ATTEMPTS {
+        let status = git_backup::get_status(skills_dir)?;
+        if status.behind > 0 {
+            let summary = merge::gated_pull_unlocked(store, skills_dir)?;
+            reconcile_skills_index_unlocked(store)?;
+            merge_summary = Some(summary);
+        }
+
+        let status = git_backup::get_status(skills_dir)?;
+        let needs_push =
+            committed || status.ahead > 0 || status.upstream_health == "no_upstream";
+        if !needs_push {
+            break;
+        }
+        // Reuses an existing tag on HEAD, so retries don't mint duplicates.
+        snapshot_tag = Some(git_backup::create_snapshot_tag_unlocked(skills_dir)?);
+        match git_backup::push_unlocked(skills_dir) {
+            Ok(()) => {
+                pushed = true;
+                break;
+            }
+            Err(e) => {
+                let msg = format!("{e:#}");
+                let rejected = msg.contains("non-fast-forward")
+                    || msg.contains("fetch first")
+                    || msg.contains("[rejected]")
+                    || msg.contains("failed to push some refs");
+                if !rejected || attempt + 1 == SYNC_PUSH_ATTEMPTS {
+                    return Err(e);
+                }
+                log::info!("git sync: push rejected (attempt {}), refetching", attempt + 1);
+                git_backup::fetch_branch(skills_dir, &branch)?;
+            }
+        }
+    }
+
+    if pushed {
+        // A successful sync also clears a lingering auto-backup failure card.
+        let _ = store.set_setting(crate::core::auto_backup::SETTING_LAST_ERROR, "");
+    }
+    store.log_audit(
+        crate::core::audit_log::AuditDraft::new("sync")
+            .detail(format!(
+                "committed={} merged={} pushed={}",
+                committed,
+                merge_summary.is_some(),
+                pushed
+            ))
+            .ok(),
+    );
+    Ok(SyncOutcome { committed, merge: merge_summary, pushed, snapshot_tag })
+}
+
 /// Pending "needs attention" conflicts (merge-engine design §4) for the
 /// Backup page. Reads the rebuildable SQLite projection.
 #[tauri::command]
@@ -751,6 +864,78 @@ mod tests {
             String::from_utf8_lossy(&user_name.stdout).trim(),
             "Work Laptop"
         );
+    }
+
+    #[test]
+    fn sync_transaction_commits_merges_and_pushes_in_one_call() {
+        let env = test_env();
+        // Local repo wired to a bare remote.
+        let remote = env._tmp.path().join("remote.git");
+        assert!(std::process::Command::new("git")
+            .args(["init", "--bare", "--initial-branch=main"])
+            .arg(&remote)
+            .output()
+            .unwrap()
+            .status
+            .success());
+        crate::core::git_backup::init_repo_unlocked(&env.skills_dir, "Device A").unwrap();
+        crate::core::git_backup::set_remote_unlocked(&env.skills_dir, remote.to_str().unwrap())
+            .unwrap();
+        crate::core::git_backup::push_unlocked(&env.skills_dir).unwrap();
+
+        // Another device clones and pushes a change (with protocol markers).
+        let other = env._tmp.path().join("other");
+        assert!(std::process::Command::new("git")
+            .arg("clone")
+            .arg(&remote)
+            .arg(&other)
+            .output()
+            .unwrap()
+            .status
+            .success());
+        crate::core::git_backup::configure_device_identity(&other, "Device B").unwrap();
+        std::fs::write(other.join("from-b.md"), "b").unwrap();
+        crate::core::git_backup::commit_all_unlocked(&other, "from B").unwrap();
+        git(&other, &["push", "origin", "main"]);
+
+        // Local uncommitted edit + being behind: one sync call must commit,
+        // merge, snapshot and push — no separate commit/pull/push round trips.
+        std::fs::write(env.skills_dir.join("local.md"), "a").unwrap();
+        let outcome = run_sync_blocking(&env.store, &env.skills_dir, "backup").unwrap();
+        assert!(outcome.committed);
+        assert!(outcome.merge.is_some(), "a merge must have run");
+        assert!(outcome.pushed);
+        assert!(outcome.snapshot_tag.is_some());
+
+        // Remote now holds the merged state with both files.
+        let remote_head = {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&remote)
+                .args(["rev-parse", "main"])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let local_head = {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&env.skills_dir)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        assert_eq!(remote_head, local_head);
+        assert!(env.skills_dir.join("from-b.md").exists());
+        assert!(env.skills_dir.join("local.md").exists());
+
+        // A second sync with nothing new is a full no-op.
+        let quiet = run_sync_blocking(&env.store, &env.skills_dir, "backup").unwrap();
+        assert!(!quiet.committed);
+        assert!(quiet.merge.is_none());
+        assert!(!quiet.pushed);
+        assert!(quiet.snapshot_tag.is_none());
     }
 
     #[test]

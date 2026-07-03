@@ -620,6 +620,18 @@ export interface MergeSummary {
 
 export const gitBackupPull = () => invoke<MergeSummary>("git_backup_pull");
 
+/** Outcome of the one-transaction sync (commit → merge → snapshot → push,
+ * with automatic retry when another device pushes concurrently). */
+export interface SyncOutcome {
+  committed: boolean;
+  merge: MergeSummary | null;
+  pushed: boolean;
+  snapshot_tag: string | null;
+}
+
+export const gitBackupSync = (message: string) =>
+  invoke<SyncOutcome>("git_backup_sync", { message });
+
 /** One "needs attention" sync conflict (merge-engine design §4). */
 export interface PendingConflict {
   skill_id: string;
