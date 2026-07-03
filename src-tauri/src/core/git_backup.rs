@@ -3,6 +3,7 @@ use chrono::Utc;
 use std::path::Path;
 use std::process::Command;
 
+use super::git2_engine;
 use super::git_credentials;
 use super::repo_lock::RepoLock;
 
@@ -73,6 +74,12 @@ pub fn fetch_remote(skills_dir: &Path) -> Result<()> {
 
     let branch = run_git(skills_dir, &["rev-parse", "--abbrev-ref", "HEAD"])
         .unwrap_or_else(|_| "main".to_string());
+    if let Some(url) = raw_remote_url(skills_dir).filter(|u| git2_engine::applies_to(u)) {
+        if let Err(e) = git2_engine::fetch(skills_dir, Some(&branch), &url) {
+            log::warn!("git fetch (git2, best-effort): {e:#}");
+        }
+        return Ok(());
+    }
     let env = remote_credential_env(skills_dir);
     let _ = run_git_env(skills_dir, &["fetch", "--quiet", "origin", &branch], &env);
     Ok(())
@@ -232,9 +239,15 @@ pub(crate) fn set_remote_unlocked(skills_dir: &Path, url: &str) -> Result<()> {
     }
 
     // Fetch remote to set up tracking
-    let env = remote_credential_env(skills_dir);
-    if let Err(e) = run_git_env(skills_dir, &["fetch", "origin"], &env) {
-        log::warn!("git set_remote: initial fetch failed (continuing): {e}");
+    if git2_engine::applies_to(url) {
+        if let Err(e) = git2_engine::fetch(skills_dir, None, url) {
+            log::warn!("git set_remote: initial fetch failed (continuing): {e:#}");
+        }
+    } else {
+        let env = remote_credential_env(skills_dir);
+        if let Err(e) = run_git_env(skills_dir, &["fetch", "origin"], &env) {
+            log::warn!("git set_remote: initial fetch failed (continuing): {e}");
+        }
     }
 
     // Set upstream tracking if branch exists on remote
@@ -273,6 +286,9 @@ pub(crate) fn set_remote_url_only(skills_dir: &Path, url: &str) -> Result<()> {
 
 /// Cheap network round-trip proving we can authenticate against origin.
 pub(crate) fn verify_remote_auth(skills_dir: &Path) -> Result<()> {
+    if let Some(url) = raw_remote_url(skills_dir).filter(|u| git2_engine::applies_to(u)) {
+        return git2_engine::ls_remote_refs(&url).map(|_| ());
+    }
     let env = remote_credential_env(skills_dir);
     run_git_env(skills_dir, &["ls-remote", "--heads", "origin"], &env).map(|_| ())
 }
@@ -281,6 +297,10 @@ pub(crate) fn verify_remote_auth(skills_dir: &Path) -> Result<()> {
 /// Uses stored keychain credentials via askpass when available. Distinguishes
 /// "freshly created empty repository" from "existing backup to restore".
 pub fn remote_has_heads(url: &str) -> Result<bool> {
+    if git2_engine::applies_to(url) {
+        let refs = git2_engine::ls_remote_refs(url)?;
+        return Ok(refs.iter().any(|r| r.starts_with("refs/heads/")));
+    }
     let env = git_credentials::credential_env_for_url(url);
     let output = git_command()
         .args(["ls-remote", "--heads"])
@@ -353,6 +373,10 @@ pub(crate) fn push_unlocked(skills_dir: &Path) -> Result<()> {
         .unwrap_or_else(|_| "main".to_string());
     log::info!("git push: starting on branch {branch}");
 
+    if let Some(url) = raw_remote_url(skills_dir).filter(|u| git2_engine::applies_to(u)) {
+        return push_via_git2(skills_dir, &branch, &url);
+    }
+
     let env = remote_credential_env(skills_dir);
 
     // Push branch first; if no upstream, set it.
@@ -413,6 +437,61 @@ pub(crate) fn push_unlocked(skills_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// git2-engine variant of `push_unlocked`: branch first, then any snapshot
+/// tags the remote is missing. Mirrors the system-git path's semantics,
+/// including treating a failed remote-tag listing as "push all tags"
+/// (re-pushing an existing identical tag is a no-op).
+fn push_via_git2(skills_dir: &Path, branch: &str, url: &str) -> Result<()> {
+    git2_engine::push_refs(
+        skills_dir,
+        &[format!("refs/heads/{branch}:refs/heads/{branch}")],
+        url,
+    )?;
+    // Idempotent; makes ahead/behind and upstream-health work after the
+    // first push, mirroring `push -u`.
+    let _ = run_git(
+        skills_dir,
+        &[
+            "branch",
+            "--set-upstream-to",
+            &format!("origin/{branch}"),
+            branch,
+        ],
+    );
+
+    let local_snapshot_tags: Vec<String> = run_git(skills_dir, &["tag", "--list", "sm-v-*"])?
+        .lines()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(|t| t.to_string())
+        .collect();
+
+    if !local_snapshot_tags.is_empty() {
+        let remote_snapshot_tags: std::collections::HashSet<String> =
+            git2_engine::ls_remote_refs(url)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|r| r.strip_prefix("refs/tags/").map(|t| t.to_string()))
+                .filter(|t| t.starts_with("sm-v-"))
+                .collect();
+
+        let missing_tag_refs: Vec<String> = local_snapshot_tags
+            .into_iter()
+            .filter(|tag| !remote_snapshot_tags.contains(tag))
+            .map(|tag| format!("refs/tags/{tag}:refs/tags/{tag}"))
+            .collect();
+
+        if !missing_tag_refs.is_empty() {
+            let pushed = missing_tag_refs.len();
+            git2_engine::push_refs(skills_dir, &missing_tag_refs, url)?;
+            log::info!("git push (git2): pushed {pushed} snapshot tag(s)");
+        }
+    }
+
+    log::info!("git push (git2): done");
+    Ok(())
+}
+
 /// Pull from the remote repository.
 #[allow(dead_code)]
 pub fn pull(skills_dir: &Path) -> Result<()> {
@@ -427,8 +506,12 @@ pub(crate) fn pull_unlocked(skills_dir: &Path) -> Result<()> {
         .unwrap_or_else(|_| "main".to_string());
     log::info!("git pull: fetch + merge origin/{branch}");
 
-    let env = remote_credential_env(skills_dir);
-    run_git_env_checked(skills_dir, &["fetch", "origin", &branch], &env)?;
+    if let Some(url) = raw_remote_url(skills_dir).filter(|u| git2_engine::applies_to(u)) {
+        git2_engine::fetch(skills_dir, Some(&branch), &url)?;
+    } else {
+        let env = remote_credential_env(skills_dir);
+        run_git_env_checked(skills_dir, &["fetch", "origin", &branch], &env)?;
+    }
     if let Err(e) = run_git(skills_dir, &["merge", &format!("origin/{branch}")]) {
         // A failed merge — almost always a content conflict on a SKILL.md body
         // edited on two machines — leaves the working tree conflicted with
@@ -741,18 +824,38 @@ pub(crate) fn clone_into_unlocked(skills_dir: &Path, url: &str) -> Result<()> {
     );
 
     // Clone
-    let env = git_credentials::credential_env_for_url(url);
-    let output = git_command()
-        .arg("clone")
-        .arg(url)
-        .arg(skills_dir)
-        .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .output();
+    let clone_result: Result<()> = if git2_engine::applies_to(url) {
+        git2_engine::clone(url, skills_dir)
+    } else {
+        let env = git_credentials::credential_env_for_url(url);
+        let output = git_command()
+            .arg("clone")
+            .arg(url)
+            .arg(skills_dir)
+            .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .output();
+        match output {
+            Ok(o) if o.status.success() => Ok(()),
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                let detail = stderr.trim();
+                if detail.is_empty() {
+                    Err(anyhow::anyhow!("git clone failed with exit code {}", o.status))
+                } else {
+                    Err(anyhow::anyhow!(
+                        "git clone failed: {}",
+                        redact_urls_in_text(detail)
+                    ))
+                }
+            }
+            Err(e) => Err(anyhow::Error::new(e).context("Failed to spawn git clone")),
+        }
+    };
 
-    match output {
-        Ok(o) if o.status.success() => {
+    match clone_result {
+        Ok(()) => {
             // Merge back any existing skills that don't conflict
             if let Some(backup) = backup_dir {
                 merge_backup(&backup, skills_dir).with_context(|| {
@@ -766,27 +869,18 @@ pub(crate) fn clone_into_unlocked(skills_dir: &Path, url: &str) -> Result<()> {
             log::info!("git clone: done");
             Ok(())
         }
-        result => {
-            // Restore backup on failure
+        Err(e) => {
+            // Restore backup on failure. A partial git2 clone can leave a
+            // half-created target (system git cleans up after itself);
+            // clear it so a retry doesn't hit "already a git repository".
             if let Some(backup) = backup_dir {
                 let _ = std::fs::remove_dir_all(skills_dir);
                 let _ = std::fs::rename(&backup, skills_dir);
+            } else if skills_dir.join(".git").exists() {
+                let _ = std::fs::remove_dir_all(skills_dir);
             }
-            match result {
-                Ok(o) => {
-                    let stderr = String::from_utf8_lossy(&o.stderr);
-                    let detail = stderr.trim();
-                    if detail.is_empty() {
-                        log::warn!("git clone: failed with exit code {}", o.status);
-                        anyhow::bail!("git clone failed with exit code {}", o.status)
-                    } else {
-                        let redacted = redact_urls_in_text(detail);
-                        log::warn!("git clone: failed: {redacted}");
-                        anyhow::bail!("git clone failed: {}", redacted)
-                    }
-                }
-                Err(e) => Err(anyhow::Error::new(e).context("Failed to spawn git clone")),
-            }
+            log::warn!("git clone: failed: {e:#}");
+            Err(e)
         }
     }
 }

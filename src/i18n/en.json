@@ -623,6 +623,8 @@
     "gitDisconnect": "Disconnect",
     "gitDisconnected": "Backup disconnected. Local skills and remote data are kept.",
     "gitDisconnectHint": "Disconnect removes the remote configuration from this machine only. Local skills and the remote repository are kept.",
+    "gitEngineGit2": "Built-in Git engine (experimental)",
+    "gitEngineGit2Desc": "Use the app's built-in Git engine for HTTPS backup network operations — no system git needed, credentials injected from the keychain. SSH and custom remotes always use system git. Turn off to revert at any time.",
     "gitStartBackup": "Set Up Backup",
     "gitStartHint": "If Remote URL is filled, it will clone from remote; otherwise it initializes a local repository.",
     "gitSetupTitle": "Set Up Git Backup",

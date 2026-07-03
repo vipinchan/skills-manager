@@ -189,6 +189,7 @@ export function Settings() {
   const [gitRemoteInput, setGitRemoteInput] = useState("");
   const [gitRemoteSaving, setGitRemoteSaving] = useState(false);
   const [gitRemoteDisconnecting, setGitRemoteDisconnecting] = useState(false);
+  const [gitEngineGit2, setGitEngineGit2] = useState(false);
   const [proxyInput, setProxyInput] = useState("");
   const [proxySaving, setProxySaving] = useState(false);
   const [textSize, setTextSize] = useState("default");
@@ -360,6 +361,9 @@ export function Settings() {
     // `.git/config` — that made a cleared URL reappear on reopen (#260).
     api.getSettings("git_backup_remote_url").then((v) => {
       setGitRemoteInput(v?.trim() || "");
+    }).catch(() => {});
+    api.getSettings("git_backup_engine").then((v) => {
+      setGitEngineGit2(v?.trim() === "git2");
     }).catch(() => {});
   }, []);
 
@@ -1662,6 +1666,28 @@ export function Settings() {
                 </button>
               </div>
               <p className="text-[12px] text-muted mt-2">{t("settings.gitDisconnectHint")}</p>
+              <label className="mt-3 flex cursor-pointer items-start gap-2">
+                <input
+                  type="checkbox"
+                  checked={gitEngineGit2}
+                  onChange={async (e) => {
+                    const next = e.target.checked;
+                    setGitEngineGit2(next);
+                    try {
+                      await api.setSettings("git_backup_engine", next ? "git2" : "system");
+                      toast.success(t("common.success"));
+                    } catch {
+                      setGitEngineGit2(!next);
+                      toast.error(t("common.error"));
+                    }
+                  }}
+                  className="mt-0.5 h-3.5 w-3.5 accent-[var(--color-accent)]"
+                />
+                <span className="min-w-0">
+                  <span className="block text-[13px] text-secondary">{t("settings.gitEngineGit2")}</span>
+                  <span className="block text-[12px] text-muted">{t("settings.gitEngineGit2Desc")}</span>
+                </span>
+              </label>
             </div>
           </div>
         </section>

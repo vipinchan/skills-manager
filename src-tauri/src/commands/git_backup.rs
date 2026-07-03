@@ -1,6 +1,6 @@
 use crate::core::{
-    central_repo, error::AppError, git_backup, git_credentials, git_fetcher, github_api,
-    skill_metadata, sync_metadata,
+    central_repo, error::AppError, git2_engine, git_backup, git_credentials, git_fetcher,
+    github_api, skill_metadata, sync_metadata,
 };
 use anyhow::Context;
 use std::path::Path;
@@ -12,6 +12,19 @@ use walkdir::WalkDir;
 use crate::core::skill_store::SkillStore;
 
 static FETCH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+/// Push the persisted engine choice (`git_backup_engine` = "git2" | "system")
+/// and proxy setting into the core layer, which has no store access. Called
+/// at the entry of every command that can touch the network.
+fn sync_engine_pref(store: &SkillStore) {
+    let git2_enabled = store
+        .get_setting("git_backup_engine")
+        .ok()
+        .flatten()
+        .map(|v| v.trim() == "git2")
+        .unwrap_or(false);
+    git2_engine::set_preference(git2_enabled, store.proxy_url());
+}
 
 /// RAII guard that clears `FETCH_IN_FLIGHT` on drop. Survives future
 /// cancellation, panic in the blocking task, and early returns — without
@@ -35,7 +48,7 @@ impl Drop for FetchInFlightGuard {
 
 #[tauri::command]
 pub async fn git_backup_fetch(store: State<'_, Arc<SkillStore>>) -> Result<(), AppError> {
-    let _ = store;
+    sync_engine_pref(&store);
     // Coalesce concurrent fetches: a `git fetch` against the central repo
     // already in flight makes any duplicate request redundant, and stacking
     // them up holds open ssh connections to GitHub.
@@ -120,6 +133,7 @@ pub async fn github_backup_connect(
     repo_name: String,
 ) -> Result<GithubBackupConnectResult, AppError> {
     let store = store.inner().clone();
+    sync_engine_pref(&store);
     tokio::task::spawn_blocking(move || connect_with_token(&store, token.trim(), repo_name.trim()))
         .await?
 }
@@ -197,6 +211,7 @@ pub async fn github_device_flow_poll(
     repo_name: String,
 ) -> Result<GithubDevicePollResult, AppError> {
     let store = store.inner().clone();
+    sync_engine_pref(&store);
     tokio::task::spawn_blocking(move || {
         let proxy_url = store.proxy_url();
         match github_api::device_flow_poll(&device_code, proxy_url.as_deref())
@@ -237,7 +252,7 @@ pub async fn git_backup_set_remote(
     store: State<'_, Arc<SkillStore>>,
     url: String,
 ) -> Result<String, AppError> {
-    let _ = store;
+    sync_engine_pref(&store);
     git_fetcher::validate_git_url(&url).map_err(AppError::git)?;
     let skills_dir = central_repo::skills_dir();
     tokio::task::spawn_blocking(move || {
@@ -301,7 +316,7 @@ pub async fn git_backup_commit(
 
 #[tauri::command]
 pub async fn git_backup_push(store: State<'_, Arc<SkillStore>>) -> Result<(), AppError> {
-    let _ = store;
+    sync_engine_pref(&store);
     let skills_dir = central_repo::skills_dir();
     tokio::task::spawn_blocking(move || {
         git_backup::push(&skills_dir).map_err(AppError::classify_git_error)
@@ -312,6 +327,7 @@ pub async fn git_backup_push(store: State<'_, Arc<SkillStore>>) -> Result<(), Ap
 #[tauri::command]
 pub async fn git_backup_pull(store: State<'_, Arc<SkillStore>>) -> Result<(), AppError> {
     let store = store.inner().clone();
+    sync_engine_pref(&store);
     let skills_dir = central_repo::skills_dir();
     tokio::task::spawn_blocking(move || {
         git_backup::with_repo_lock("git pull", || {
@@ -330,6 +346,7 @@ pub async fn git_backup_clone(
 ) -> Result<(), AppError> {
     git_fetcher::validate_git_url(&url).map_err(AppError::git)?;
     let store = store.inner().clone();
+    sync_engine_pref(&store);
     let skills_dir = central_repo::skills_dir();
     tokio::task::spawn_blocking(move || {
         let effective = sanitize_url_to_keychain(url.trim());
@@ -352,6 +369,7 @@ pub async fn git_backup_reclone(
 ) -> Result<(), AppError> {
     git_fetcher::validate_git_url(&url).map_err(AppError::git)?;
     let store = store.inner().clone();
+    sync_engine_pref(&store);
     let skills_dir = central_repo::skills_dir();
     tokio::task::spawn_blocking(move || {
         let effective = sanitize_url_to_keychain(url.trim());
@@ -433,6 +451,7 @@ pub async fn git_backup_migrate_credentials(
 }
 
 pub fn migrate_embedded_credentials(store: &SkillStore) -> anyhow::Result<Option<String>> {
+    sync_engine_pref(store);
     let skills_dir = central_repo::skills_dir();
     git_backup::with_repo_lock("git credential migration", || {
         migrate_embedded_credentials_unlocked(store, &skills_dir)
