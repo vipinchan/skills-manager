@@ -456,6 +456,51 @@ pub(crate) fn commit_all_unlocked(skills_dir: &Path, message: &str) -> Result<()
     Ok(())
 }
 
+/// Delete `refs/skills-manager/*` copies that a mirror / push-all style
+/// operation uploaded to the remote (merge-engine design §11-2). The app's
+/// own push never sends them; this cleans up after manual advanced git use.
+/// Local refs under the namespace are functional (conflict pins, recovery
+/// anchors) and stay untouched. Returns the number of remote refs removed.
+pub fn prune_hidden_refs_on_remote(skills_dir: &Path) -> Result<usize> {
+    ensure_repo(skills_dir)?;
+    const HIDDEN_PREFIX: &str = "refs/skills-manager/";
+
+    if let Some(url) = raw_remote_url(skills_dir).filter(|u| git2_engine::applies_to(u)) {
+        let refs: Vec<String> = git2_engine::ls_remote_refs(&url)?
+            .into_iter()
+            .filter(|r| r.starts_with(HIDDEN_PREFIX))
+            .collect();
+        if refs.is_empty() {
+            return Ok(0);
+        }
+        let refspecs: Vec<String> = refs.iter().map(|r| format!(":{r}")).collect();
+        git2_engine::push_refs(skills_dir, &refspecs, &url)?;
+        log::info!("git prune hidden refs (git2): removed {} remote ref(s)", refs.len());
+        return Ok(refs.len());
+    }
+
+    let env = remote_credential_env(skills_dir);
+    let listed = run_git_env(
+        skills_dir,
+        &["ls-remote", "origin", &format!("{HIDDEN_PREFIX}*")],
+        &env,
+    )?;
+    let refspecs: Vec<String> = listed
+        .lines()
+        .filter_map(|line| line.split_whitespace().nth(1))
+        .filter(|r| r.starts_with(HIDDEN_PREFIX))
+        .map(|r| format!(":{r}"))
+        .collect();
+    if refspecs.is_empty() {
+        return Ok(0);
+    }
+    let mut args: Vec<&str> = vec!["push", "origin"];
+    args.extend(refspecs.iter().map(String::as_str));
+    run_git_env_checked(skills_dir, &args, &env)?;
+    log::info!("git prune hidden refs: removed {} remote ref(s)", refspecs.len());
+    Ok(refspecs.len())
+}
+
 /// Commit for a conflict resolution (merge-engine design §4): the message
 /// arrives with its trailers already built (protocol + Resolved), and the
 /// commit may be empty — "keep local" changes nothing in the tree yet must
@@ -1841,6 +1886,54 @@ mod tests {
             "remote should have branch main after first push"
         );
         assert_eq!(detect_upstream_health(&work, true), "healthy");
+    }
+
+    #[test]
+    fn prune_hidden_refs_removes_remote_copies_and_keeps_local_refs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let remote = tmp.path().join("remote.git");
+        let work = tmp.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        assert!(Command::new("git")
+            .args(["init", "--bare", "--initial-branch=main"])
+            .arg(&remote)
+            .output()
+            .unwrap()
+            .status
+            .success());
+
+        init_repo_unlocked(&work, "Device A").unwrap();
+        set_remote_unlocked(&work, remote.to_str().unwrap()).unwrap();
+        push_unlocked(&work).unwrap();
+
+        // Simulate a mirror-style push leaking hidden refs to the remote,
+        // plus a functional local ref that must survive.
+        run_git_checked(
+            &work,
+            &["update-ref", "refs/skills-manager/conflict/skill-x", "HEAD"],
+        )
+        .unwrap();
+        run_git_checked(&work, &["update-ref", "refs/skills-manager/pre-merge", "HEAD"]).unwrap();
+        run_git_checked(
+            &work,
+            &["push", "origin", "refs/skills-manager/conflict/skill-x", "refs/skills-manager/pre-merge"],
+        )
+        .unwrap();
+        let leaked = run_git(&work, &["ls-remote", "origin", "refs/skills-manager/*"]).unwrap();
+        assert_eq!(leaked.lines().count(), 2, "setup: refs must be on the remote");
+
+        let removed = prune_hidden_refs_on_remote(&work).unwrap();
+        assert_eq!(removed, 2);
+        let after = run_git(&work, &["ls-remote", "origin", "refs/skills-manager/*"]).unwrap();
+        assert!(after.trim().is_empty(), "remote hidden refs must be gone: {after}");
+        // Branch and local functional refs are untouched.
+        run_git(&work, &["rev-parse", "refs/skills-manager/conflict/skill-x"]).unwrap();
+        run_git(&work, &["rev-parse", "refs/skills-manager/pre-merge"]).unwrap();
+        let heads = run_git(&work, &["ls-remote", "--heads", "origin"]).unwrap();
+        assert!(heads.contains("refs/heads/main"));
+
+        // Idempotent: nothing left to remove.
+        assert_eq!(prune_hidden_refs_on_remote(&work).unwrap(), 0);
     }
 
     #[test]

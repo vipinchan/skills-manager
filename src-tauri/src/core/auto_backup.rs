@@ -1,8 +1,14 @@
 //! Automatic backup (§3.4): after central-repo changes settle for a couple of
 //! minutes, commit and push in the background — no snapshot tag (tags are
-//! reserved for user-visible backup points), and no automatic pull (a remote
-//! that moved ahead stays in the "pending changes" state until the user syncs
-//! manually; automatic merging is Phase 3d).
+//! reserved for user-visible backup points).
+//!
+//! With the object merge engine (merge-engine design §9 3d-γ) a round that
+//! finds the remote ahead also merges it and pushes, so two devices converge
+//! hands-free. The one deliberate exception (§4 收窄阻尼): while a remote
+//! change touches a skill that is pending a local conflict decision, the
+//! round backs off and waits for a manual sync — unrelated updates keep
+//! flowing. With the `merge_engine=system` escape hatch the old behavior
+//! (wait for manual sync whenever the remote is ahead) is kept.
 
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use std::sync::Arc;
@@ -13,6 +19,7 @@ use tauri::{AppHandle, Emitter, Runtime};
 
 use super::central_repo;
 use super::git_backup;
+use super::merge;
 use super::repo_lock::RepoLock;
 use super::skill_store::SkillStore;
 use super::sync_metadata;
@@ -75,9 +82,13 @@ pub(crate) enum Outcome {
     UpToDate,
     /// Committed and/or pushed successfully.
     BackedUp,
-    /// The remote moved ahead (another device pushed). Not an error: the
-    /// library stays in "pending changes" until a manual sync merges (§4.4).
+    /// The remote moved ahead (another device pushed). With the system
+    /// engine this waits for a manual sync; with the object engine it is a
+    /// transient state — the re-armed next round merges and pushes.
     RemoteAhead,
+    /// §4 收窄阻尼: the remote touches a skill with an unresolved local
+    /// conflict — deliberate backpressure until a manual decision.
+    PausedOnConflict,
     Failed(String),
 }
 
@@ -163,7 +174,14 @@ fn handle_outcome<R: Runtime>(app: &AppHandle<R>, store: &SkillStore, outcome: O
         }
         Outcome::RemoteAhead => {
             CONSECUTIVE_FAILURES.store(0, Ordering::Release);
-            log::info!("auto backup: remote is ahead, waiting for manual sync");
+            log::info!("auto backup: remote is ahead, waiting for the next round or manual sync");
+            emit(AutoBackupPayload { ok: false, pending: true, error: None });
+        }
+        Outcome::PausedOnConflict => {
+            CONSECUTIVE_FAILURES.store(0, Ordering::Release);
+            log::info!(
+                "auto backup: remote touches a pending conflict — paused until it is resolved (§4)"
+            );
             emit(AutoBackupPayload { ok: false, pending: true, error: None });
         }
         Outcome::Failed(msg) => {
@@ -200,6 +218,12 @@ pub(crate) fn run_round_blocking(store: &SkillStore) -> Outcome {
         return Outcome::Skipped("interrupted git operation");
     }
 
+    // See the true remote state (3d-γ): rounds are debounced, so one quiet
+    // fetch per round is cheap; offline it just leaves the refs stale.
+    if let Err(e) = git_backup::fetch_remote(&skills_dir) {
+        log::debug!("auto backup: fetch failed (continuing offline): {e:#}");
+    }
+
     let status = match git_backup::get_status(&skills_dir) {
         Ok(status) => status,
         Err(e) => return Outcome::Failed(format!("{e:#}")),
@@ -227,12 +251,37 @@ pub(crate) fn run_round_blocking(store: &SkillStore) -> Outcome {
         Err(e) => return Outcome::Failed(format!("{e:#}")),
     }
 
-    // Local commits are still valuable when the remote is ahead, but pushing
-    // would be rejected — leave the merge to a user-driven sync.
     if status.behind > 0 {
-        return Outcome::RemoteAhead;
+        // The system engine never line-merges in the background — the local
+        // commit is safe, the merge waits for a user-driven sync.
+        if !merge::object_merge_enabled(store) {
+            return Outcome::RemoteAhead;
+        }
+        // §4 收窄阻尼: unrelated remote updates flow automatically; a remote
+        // change to a skill awaiting a local conflict decision pauses the
+        // round (deliberate backpressure, cleared by resolving + syncing).
+        match merge::remote_touches_pending(store, &skills_dir) {
+            Ok(true) => return Outcome::PausedOnConflict,
+            Ok(false) => {}
+            Err(e) => return Outcome::Failed(format!("{e:#}")),
+        }
+        match merge::gated_pull_unlocked(store, &skills_dir) {
+            Ok(_summary) => {
+                if let Err(e) = crate::commands::git_backup::reconcile_skills_index_unlocked(store)
+                {
+                    return Outcome::Failed(format!("{e:#}"));
+                }
+            }
+            Err(e) => return Outcome::Failed(format!("{e:#}")),
+        }
     }
 
+    // Re-read after a possible merge: a merge commit shows up as ahead > 0,
+    // a pure fast-forward leaves nothing to push.
+    let status = match git_backup::get_status(&skills_dir) {
+        Ok(status) => status,
+        Err(e) => return Outcome::Failed(format!("{e:#}")),
+    };
     let needs_push = committed || status.ahead > 0 || status.upstream_health == "no_upstream";
     if !needs_push {
         return Outcome::UpToDate;
@@ -246,6 +295,9 @@ pub(crate) fn run_round_blocking(store: &SkillStore) -> Outcome {
                 || msg.contains("[rejected]")
                 || msg.contains("failed to push some refs")
             {
+                // Another device pushed inside our window. Re-arm so the next
+                // round (post-debounce) fetches, merges and retries.
+                notify_central_change();
                 Outcome::RemoteAhead
             } else {
                 Outcome::Failed(msg)
@@ -413,10 +465,8 @@ mod tests {
         assert_eq!(run_round_blocking(&env.store), Outcome::UpToDate);
     }
 
-    #[test]
-    fn round_reports_remote_ahead_without_recording_an_error() {
-        let env = test_env();
-        // Another "device" pushes first.
+    /// Clone the test remote as a second "device" with its own identity.
+    fn clone_other_device(env: &TestEnv) -> std::path::PathBuf {
         let other = env._tmp.path().join("other");
         let out = std::process::Command::new("git")
             .arg("clone")
@@ -425,16 +475,22 @@ mod tests {
             .output()
             .unwrap();
         assert!(out.status.success());
-        git(&other, &["config", "user.email", "b@example.com"]);
-        git(&other, &["config", "user.name", "Device B"]);
+        git_backup::configure_device_identity(&other, "Device B").unwrap();
+        other
+    }
+
+    #[test]
+    fn round_with_system_engine_waits_for_manual_sync_when_remote_ahead() {
+        let env = test_env();
+        // Escape hatch: the legacy engine never merges in the background.
+        env.store.set_setting("merge_engine", "system").unwrap();
+        let other = clone_other_device(&env);
         std::fs::write(other.join("from-b.md"), "b").unwrap();
         git(&other, &["add", "-A"]);
         git(&other, &["commit", "-m", "from B"]);
         git(&other, &["push", "origin", "main"]);
 
-        // Local edit + fetch so the round sees behind > 0.
         std::fs::write(env.skills_dir.join("local.md"), "a").unwrap();
-        git(&env.skills_dir, &["fetch", "origin"]);
 
         let outcome = run_round_blocking(&env.store);
         assert_eq!(outcome, Outcome::RemoteAhead);
@@ -448,6 +504,112 @@ mod tests {
         assert_eq!(
             env.store.get_setting(SETTING_LAST_ERROR).unwrap(),
             None
+        );
+    }
+
+    #[test]
+    fn round_merges_remote_changes_and_pushes_back() {
+        // 3d-γ: with the (default) object engine, a round that finds the
+        // remote ahead merges it and pushes the result — hands-free two-way
+        // sync, including the round's own fetch.
+        let env = test_env();
+        let other = clone_other_device(&env);
+        std::fs::write(other.join("from-b.md"), "b").unwrap();
+        git_backup::commit_all_unlocked(&other, "from B").unwrap();
+        git(&other, &["push", "origin", "main"]);
+
+        // No manual fetch here — the round discovers the remote change itself.
+        std::fs::write(env.skills_dir.join("local.md"), "a").unwrap();
+        let outcome = run_round_blocking(&env.store);
+        assert_eq!(outcome, Outcome::BackedUp);
+
+        // Both sides' changes are present locally and on the remote.
+        assert!(env.skills_dir.join("from-b.md").exists());
+        assert!(env.skills_dir.join("local.md").exists());
+        let remote_head = git_out(&env.remote, &["rev-parse", "main"]);
+        let local_head = git_out(&env.skills_dir, &["rev-parse", "HEAD"]);
+        assert_eq!(remote_head, local_head);
+        assert_eq!(env.store.get_setting(SETTING_LAST_ERROR).unwrap(), None);
+    }
+
+    #[test]
+    fn round_pauses_when_remote_touches_a_pending_conflict() {
+        // §4 收窄阻尼: a remote change to a skill that awaits a local
+        // conflict decision pauses the automatic round; an unrelated remote
+        // change keeps flowing.
+        let env = test_env();
+        let other = clone_other_device(&env);
+
+        // A managed skill exists on both sides (seeded through the remote).
+        let seed_skill = |dir: &Path| {
+            let skill_dir = dir.join("alpha");
+            std::fs::create_dir_all(&skill_dir).unwrap();
+            std::fs::write(skill_dir.join("SKILL.md"), "base").unwrap();
+            let meta_dir = dir.join(".skills-manager/skills");
+            std::fs::create_dir_all(&meta_dir).unwrap();
+            let meta = crate::core::sync_metadata::SkillMetaFile {
+                schema_version: 1,
+                skill_id: "skill-1".to_string(),
+                path: "alpha".to_string(),
+                path_key: "alpha".to_string(),
+                enabled: true,
+                tags: vec![],
+                source: crate::core::sync_metadata::SourceMeta {
+                    source_type: "import".to_string(),
+                    ref_: None,
+                    subpath: None,
+                    branch: None,
+                },
+            };
+            std::fs::write(
+                meta_dir.join("skill-1.json"),
+                crate::core::sync_metadata::canonical_json_bytes(&meta).unwrap(),
+            )
+            .unwrap();
+            std::fs::write(
+                dir.join(".skills-manager/schema.json"),
+                b"{\n  \"schema_version\": 1,\n  \"app_min_version\": \"2.0.0\",\n  \"created_by\": \"skills-manager\"\n}\n",
+            )
+            .unwrap();
+        };
+        seed_skill(&env.skills_dir);
+        crate::core::sync_metadata::reindex_from_metadata_unlocked(&env.store).unwrap();
+        git_backup::commit_all_unlocked(&env.skills_dir, "seed skill").unwrap();
+        git_backup::push_unlocked(&env.skills_dir).unwrap();
+        git(&other, &["pull", "origin", "main"]);
+
+        // The skill is pending a local decision (projection row is the gate
+        // the damping check reads).
+        env.store
+            .replace_pending_conflicts(&[crate::core::skill_store::PendingConflictRow {
+                skill_id: "skill-1".to_string(),
+                theirs_commit: String::new(),
+                theirs_path: Some("alpha".to_string()),
+                detected_at: 1,
+            }])
+            .unwrap();
+
+        // Remote touches that very skill → the round pauses.
+        std::fs::write(other.join("alpha/SKILL.md"), "changed on B").unwrap();
+        git_backup::commit_all_unlocked(&other, "touch pending skill").unwrap();
+        git(&other, &["push", "origin", "main"]);
+        std::fs::write(env.skills_dir.join("local.md"), "a").unwrap();
+        let outcome = run_round_blocking(&env.store);
+        assert_eq!(outcome, Outcome::PausedOnConflict);
+        // Local version untouched, remote not merged.
+        assert_eq!(
+            std::fs::read_to_string(env.skills_dir.join("alpha/SKILL.md")).unwrap(),
+            "base"
+        );
+
+        // Once the conflict is resolved (projection cleared), the same
+        // remote state merges automatically again.
+        env.store.replace_pending_conflicts(&[]).unwrap();
+        let outcome = run_round_blocking(&env.store);
+        assert_eq!(outcome, Outcome::BackedUp);
+        assert_eq!(
+            std::fs::read_to_string(env.skills_dir.join("alpha/SKILL.md")).unwrap(),
+            "changed on B"
         );
     }
 

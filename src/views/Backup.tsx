@@ -807,7 +807,15 @@ export function Backup() {
                   {pendingConflicts.length}
                 </span>
               </div>
-              <p className="mb-3 text-[13px] leading-5 text-muted">{t("backup.conflicts.desc")}</p>
+              <p className="mb-3 text-[13px] leading-5 text-muted">
+                {t("backup.conflicts.desc")}
+                {(gitStatus?.behind ?? 0) > 0 && (
+                  <>
+                    {" "}
+                    {t("backup.conflicts.autoPaused")}
+                  </>
+                )}
+              </p>
               <ul className="space-y-2">
                 {pendingConflicts.map((conflict) => {
                   const busy = resolvingConflict === conflict.skill_id;

@@ -15,7 +15,9 @@ pub mod snapshot;
 pub mod treebuild;
 pub mod validate;
 
-pub use apply::{MergeSummary, object_merge_pull_unlocked, recover_on_startup};
+pub use apply::{
+    MergeSummary, object_merge_pull_unlocked, recover_on_startup, remote_touches_pending,
+};
 
 /// Settings key of the engine switch (§9). Since 3d-β the object merge is
 /// the default; an explicit "system" value is the escape hatch back to the

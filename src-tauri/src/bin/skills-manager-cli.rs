@@ -234,6 +234,9 @@ enum GitCommand {
     Restore {
         tag: String,
     },
+    /// Remove refs/skills-manager/* that a `git push --mirror`/--all style
+    /// operation uploaded to the backup remote. Local sync refs are kept.
+    PruneSyncRefs,
 }
 
 #[derive(Debug, Serialize)]
@@ -1801,6 +1804,10 @@ fn run_git(args: GitArgs, store: &SkillStore, has_skills_root: bool, json: bool)
         GitCommand::Restore { tag } => {
             git_backup::restore_snapshot_version(&central_repo::skills_dir(), &tag)?;
             print_json(&git_backup::get_status(&central_repo::skills_dir())?, json);
+        }
+        GitCommand::PruneSyncRefs => {
+            let removed = git_backup::prune_hidden_refs_on_remote(&central_repo::skills_dir())?;
+            print_json(&serde_json::json!({ "removed": removed }), json);
         }
     }
     Ok(())
