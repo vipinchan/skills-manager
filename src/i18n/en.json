@@ -978,6 +978,7 @@
     "removeButton": "Remove selected ({{count}})",
     "addedToast": "Added {{added}} skill-agent item(s), skipped {{skipped}} existing.",
     "removedToast": "Removed {{removed}} skill-agent item(s).",
+    "duplicateSkillsSkipped": "Duplicate skill names detected. Synced the canonical version only; skipped {{count}} duplicate item(s) ({{names}}).",
     "partialFailedToast": "{{count}} operation(s) failed",
     "nothingToAdd": "No missing skills to add",
     "nothingToRemove": "No matching skills to remove",

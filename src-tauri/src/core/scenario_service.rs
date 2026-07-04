@@ -6,8 +6,7 @@ use std::time::Instant;
 use super::{
     error::AppError,
     skill_store::{ScenarioRecord, SkillStore, SkillTargetRecord},
-    sync_engine, tool_adapters,
-    tool_service,
+    sync_engine, tool_adapters, tool_service,
 };
 
 #[derive(Debug, Clone)]
@@ -32,6 +31,26 @@ pub struct SyncPreviewTarget {
     pub tool: String,
     pub target_path: String,
     pub mode: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DuplicateScenarioSkill {
+    pub skill_id: String,
+    pub skill_name: String,
+    pub tool: String,
+    pub target_name: String,
+    pub selected_skill_id: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ScenarioSyncReport {
+    pub duplicate_skills: Vec<DuplicateScenarioSkill>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScenarioSyncPlan {
+    pub targets: Vec<ScenarioSyncTarget>,
+    pub report: ScenarioSyncReport,
 }
 
 pub fn ensure_scenario_exists(store: &SkillStore, scenario_id: &str) -> Result<(), AppError> {
@@ -73,17 +92,85 @@ pub fn collect_scenario_sync_targets(
     store: &SkillStore,
     scenario_id: &str,
 ) -> Result<Vec<ScenarioSyncTarget>, AppError> {
-    let skills = store
+    collect_scenario_sync_plan(store, scenario_id).map(|plan| plan.targets)
+}
+
+pub fn collect_scenario_sync_plan(
+    store: &SkillStore,
+    scenario_id: &str,
+) -> Result<ScenarioSyncPlan, AppError> {
+    let mut skills = store
         .get_skills_for_scenario(scenario_id)
         .map_err(AppError::db)?;
     let configured_mode = store.get_setting("sync_mode").map_err(AppError::db)?;
+    let duplicate_names: HashSet<String> = skills
+        .iter()
+        .fold(HashMap::<String, usize>::new(), |mut counts, skill| {
+            *counts.entry(skill.name.clone()).or_default() += 1;
+            counts
+        })
+        .into_iter()
+        .filter_map(|(name, count)| (count > 1).then_some(name))
+        .collect();
+    if !duplicate_names.is_empty() {
+        skills.sort_by(|left, right| {
+            let left_duplicate = duplicate_names.contains(&left.name);
+            let right_duplicate = duplicate_names.contains(&right.name);
+            match (left_duplicate, right_duplicate) {
+                (true, true) if left.name == right.name => {
+                    let left_source = PathBuf::from(&left.central_path);
+                    let right_source = PathBuf::from(&right.central_path);
+                    let left_canonical =
+                        sync_engine::target_dir_name(&left_source, &left.name) == left.name;
+                    let right_canonical =
+                        sync_engine::target_dir_name(&right_source, &right.name) == right.name;
+                    right_canonical
+                        .cmp(&left_canonical)
+                        .then_with(|| left.created_at.cmp(&right.created_at))
+                        .then_with(|| left.id.cmp(&right.id))
+                }
+                _ => std::cmp::Ordering::Equal,
+            }
+        });
+    }
+    let mut emitted_targets = HashSet::<(String, String)>::new();
+    let mut selected_by_target = HashMap::<(String, String), String>::new();
     let mut targets = Vec::new();
+    let mut duplicate_skills = Vec::new();
 
     for skill in &skills {
         let source = PathBuf::from(&skill.central_path);
-        let target_name = sync_engine::target_dir_name(&source, &skill.name);
-        let adapters = enabled_installed_adapters_for_scenario_skill(store, scenario_id, &skill.id)?;
+        let target_name = if duplicate_names.contains(&skill.name) {
+            skill.name.clone()
+        } else {
+            sync_engine::target_dir_name(&source, &skill.name)
+        };
+        let adapters =
+            enabled_installed_adapters_for_scenario_skill(store, scenario_id, &skill.id)?;
         for adapter in &adapters {
+            if !emitted_targets.insert((adapter.key.clone(), target_name.clone())) {
+                let selected_skill_id = selected_by_target
+                    .get(&(adapter.key.clone(), target_name.clone()))
+                    .cloned()
+                    .unwrap_or_default();
+                duplicate_skills.push(DuplicateScenarioSkill {
+                    skill_id: skill.id.clone(),
+                    skill_name: skill.name.clone(),
+                    tool: adapter.key.clone(),
+                    target_name: target_name.clone(),
+                    selected_skill_id: selected_skill_id.clone(),
+                });
+                log::warn!(
+                    "Skipping duplicate skill '{}' ({}) for {}; target '{}' is already selected in preset {}",
+                    skill.name,
+                    skill.id,
+                    adapter.key,
+                    target_name,
+                    scenario_id
+                );
+                continue;
+            }
+            selected_by_target.insert((adapter.key.clone(), target_name.clone()), skill.id.clone());
             let target = adapter.skills_dir().join(&target_name);
             let mode = sync_engine::sync_mode_for_tool(&adapter.key, configured_mode.as_deref());
             targets.push(ScenarioSyncTarget {
@@ -98,7 +185,10 @@ pub fn collect_scenario_sync_targets(
         }
     }
 
-    Ok(targets)
+    Ok(ScenarioSyncPlan {
+        targets,
+        report: ScenarioSyncReport { duplicate_skills },
+    })
 }
 
 pub fn preview_scenario_sync(
@@ -134,7 +224,10 @@ pub fn preview_scenario_sync(
 /// The reverse direction (existing `"symlink"`, desired `Copy`) returns
 /// `None` because the user actively changed the `sync_mode` setting and
 /// the on-disk symlink doesn't reflect that intent.
-fn skip_check_mode(existing_mode: &str, desired: sync_engine::SyncMode) -> Option<sync_engine::SyncMode> {
+fn skip_check_mode(
+    existing_mode: &str,
+    desired: sync_engine::SyncMode,
+) -> Option<sync_engine::SyncMode> {
     match (existing_mode, desired) {
         ("symlink", sync_engine::SyncMode::Symlink) => Some(sync_engine::SyncMode::Symlink),
         ("copy", sync_engine::SyncMode::Copy) => Some(sync_engine::SyncMode::Copy),
@@ -333,22 +426,44 @@ pub fn unsync_scenario_skills(store: &SkillStore, scenario_id: &str) -> Result<(
 }
 
 pub fn sync_scenario_skills(store: &SkillStore, scenario_id: &str) -> Result<(), AppError> {
-    let desired_targets = collect_scenario_sync_targets(store, scenario_id)?;
-    sync_desired_targets(store, &desired_targets)
+    let plan = collect_scenario_sync_plan(store, scenario_id)?;
+    unsync_obsolete_scenario_targets(store, scenario_id, &plan.targets)?;
+    sync_desired_targets(store, &plan.targets)
+}
+
+pub fn sync_scenario_skills_with_report(
+    store: &SkillStore,
+    scenario_id: &str,
+) -> Result<ScenarioSyncReport, AppError> {
+    let plan = collect_scenario_sync_plan(store, scenario_id)?;
+    unsync_obsolete_scenario_targets(store, scenario_id, &plan.targets)?;
+    sync_desired_targets(store, &plan.targets)?;
+    Ok(plan.report)
 }
 
 pub fn apply_scenario_to_default(store: &SkillStore, scenario_id: &str) -> Result<(), AppError> {
+    apply_scenario_to_default_with_report(store, scenario_id).map(|_| ())
+}
+
+pub fn apply_scenario_to_default_with_report(
+    store: &SkillStore,
+    scenario_id: &str,
+) -> Result<ScenarioSyncReport, AppError> {
     ensure_scenario_exists(store, scenario_id)?;
-    let desired_targets = collect_scenario_sync_targets(store, scenario_id)?;
+    let plan = collect_scenario_sync_plan(store, scenario_id)?;
 
     if let Ok(Some(old_id)) = store.get_active_scenario_id() {
         if old_id != scenario_id {
-            unsync_obsolete_scenario_targets(store, &old_id, &desired_targets)?;
+            unsync_obsolete_scenario_targets(store, &old_id, &plan.targets)?;
         }
     }
 
-    store.set_active_scenario(scenario_id).map_err(AppError::db)?;
-    sync_desired_targets(store, &desired_targets)
+    store
+        .set_active_scenario(scenario_id)
+        .map_err(AppError::db)?;
+    unsync_obsolete_scenario_targets(store, scenario_id, &plan.targets)?;
+    sync_desired_targets(store, &plan.targets)?;
+    Ok(plan.report)
 }
 
 pub fn sync_skill_to_active_scenario(
@@ -358,7 +473,8 @@ pub fn sync_skill_to_active_scenario(
 ) -> Result<(), AppError> {
     if let Ok(Some(active_id)) = store.get_active_scenario_id() {
         if active_id == scenario_id {
-            let adapters = enabled_installed_adapters_for_scenario_skill(store, scenario_id, skill_id)?;
+            let adapters =
+                enabled_installed_adapters_for_scenario_skill(store, scenario_id, skill_id)?;
             let configured_mode = store.get_setting("sync_mode").map_err(AppError::db)?;
             let Ok(Some(skill)) = store.get_skill_by_id(skill_id) else {
                 return Ok(());
@@ -378,7 +494,8 @@ pub fn sync_skill_to_active_scenario(
                 }
 
                 let target = adapter.skills_dir().join(&target_name);
-                let mode = sync_engine::sync_mode_for_tool(&adapter.key, configured_mode.as_deref());
+                let mode =
+                    sync_engine::sync_mode_for_tool(&adapter.key, configured_mode.as_deref());
                 match sync_engine::sync_skill(&source, &target, mode) {
                     Ok(actual_mode) => {
                         let now = chrono::Utc::now().timestamp_millis();
@@ -423,7 +540,9 @@ pub fn ensure_default_startup_scenario(store: &SkillStore) -> Result<(), AppErro
             created_at: now,
             updated_at: now,
         };
-        store.insert_scenario(&default_scenario).map_err(AppError::db)?;
+        store
+            .insert_scenario(&default_scenario)
+            .map_err(AppError::db)?;
         scenarios.push(default_scenario);
     }
 
@@ -464,7 +583,9 @@ pub fn ensure_cli_scenario_state(store: &SkillStore) -> Result<(), AppError> {
             created_at: now,
             updated_at: now,
         };
-        store.insert_scenario(&default_scenario).map_err(AppError::db)?;
+        store
+            .insert_scenario(&default_scenario)
+            .map_err(AppError::db)?;
         scenarios.push(default_scenario);
     }
 
@@ -505,7 +626,8 @@ pub fn sync_active_scenario_to_tool(store: &SkillStore, tool_key: &str) {
             return;
         };
         for skill_id in skill_ids {
-            if let Ok(adapters) = enabled_installed_adapters_for_scenario_skill(store, &active_id, &skill_id)
+            if let Ok(adapters) =
+                enabled_installed_adapters_for_scenario_skill(store, &active_id, &skill_id)
             {
                 if adapters.iter().any(|adapter| adapter.key == tool_key) {
                     let _ = sync_skill_to_active_scenario(store, &active_id, &skill_id);
@@ -758,6 +880,144 @@ fn apply_remove(
 }
 
 #[cfg(test)]
+mod collect_scenario_sync_targets_tests {
+    use super::*;
+    use crate::core::central_repo;
+    use crate::core::skill_store::{ScenarioRecord, SkillRecord, SkillStore, SkillTargetRecord};
+    use std::fs;
+    use tempfile::tempdir;
+
+    fn sample_skill(id: &str, name: &str, central_path: PathBuf, updated_at: i64) -> SkillRecord {
+        SkillRecord {
+            id: id.to_string(),
+            name: name.to_string(),
+            description: None,
+            source_type: "import".to_string(),
+            source_ref: Some(central_path.to_string_lossy().to_string()),
+            source_ref_resolved: None,
+            source_subpath: None,
+            source_branch: None,
+            source_revision: None,
+            remote_revision: None,
+            central_path: central_path.to_string_lossy().to_string(),
+            content_hash: Some(format!("hash-{id}")),
+            enabled: true,
+            created_at: updated_at,
+            updated_at,
+            status: "ok".to_string(),
+            update_status: "local_only".to_string(),
+            last_checked_at: None,
+            last_check_error: None,
+        }
+    }
+
+    #[test]
+    fn duplicate_skill_names_sync_only_canonical_target_per_tool() {
+        let _lock = central_repo::test_base_dir_lock();
+        let tmp = tempdir().unwrap();
+        let base = tmp.path().join("repo");
+        central_repo::set_test_base_dir_override(Some(base.clone()));
+        fs::create_dir_all(central_repo::skills_dir()).unwrap();
+        let store = SkillStore::new(&base.join("test.db")).unwrap();
+
+        let target_base = tmp.path().join("agent-skills");
+        fs::create_dir_all(&target_base).unwrap();
+        let custom_tools = vec![tool_adapters::CustomToolDef {
+            key: "test_agent".to_string(),
+            display_name: "Test Agent".to_string(),
+            skills_dir: target_base.to_string_lossy().to_string(),
+            project_relative_skills_dir: None,
+            category: Default::default(),
+        }];
+        store
+            .set_setting(
+                "custom_tools",
+                &serde_json::to_string(&custom_tools).unwrap(),
+            )
+            .unwrap();
+        let disabled_builtin_tools: Vec<String> = tool_adapters::default_tool_adapters()
+            .into_iter()
+            .map(|adapter| adapter.key)
+            .collect();
+        store
+            .set_setting(
+                "disabled_tools",
+                &serde_json::to_string(&disabled_builtin_tools).unwrap(),
+            )
+            .unwrap();
+
+        store
+            .insert_scenario(&ScenarioRecord {
+                id: "preset".to_string(),
+                name: "Preset".to_string(),
+                description: None,
+                icon: None,
+                sort_order: 0,
+                created_at: 1,
+                updated_at: 1,
+            })
+            .unwrap();
+
+        for (id, dir_name, updated_at) in [
+            ("dws-old", "dws", 1),
+            ("dws-copy-2", "dws-2", 2),
+            ("dws-copy-3", "dws-3", 3),
+        ] {
+            let central_path = central_repo::skills_dir().join(dir_name);
+            fs::create_dir_all(&central_path).unwrap();
+            fs::write(central_path.join("SKILL.md"), "---\nname: dws\n---\n").unwrap();
+            store
+                .insert_skill(&sample_skill(id, "dws", central_path, updated_at))
+                .unwrap();
+            store.add_skill_to_scenario("preset", id).unwrap();
+        }
+
+        let plan = collect_scenario_sync_plan(&store, "preset").unwrap();
+        let targets = &plan.targets;
+
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].skill_id, "dws-old");
+        assert_eq!(targets[0].target, target_base.join("dws"));
+        assert_eq!(plan.report.duplicate_skills.len(), 2);
+
+        for (skill_id, dir_name) in [("dws-copy-2", "dws-2"), ("dws-copy-3", "dws-3")] {
+            let target = target_base.join(dir_name);
+            fs::create_dir_all(&target).unwrap();
+            fs::write(target.join("STALE.txt"), "old duplicate target").unwrap();
+            store
+                .insert_target(&SkillTargetRecord {
+                    id: format!("target-{skill_id}"),
+                    skill_id: skill_id.to_string(),
+                    tool: "test_agent".to_string(),
+                    target_path: target.to_string_lossy().to_string(),
+                    mode: "copy".to_string(),
+                    status: "ok".to_string(),
+                    synced_at: Some(1),
+                    last_error: None,
+                    source_hash: Some(format!("hash-{skill_id}")),
+                })
+                .unwrap();
+        }
+
+        sync_scenario_skills(&store, "preset").unwrap();
+
+        assert!(target_base.join("dws").exists());
+        assert!(!target_base.join("dws-2").exists());
+        assert!(!target_base.join("dws-3").exists());
+        assert!(store
+            .get_targets_for_skill("dws-copy-2")
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .get_targets_for_skill("dws-copy-3")
+            .unwrap()
+            .is_empty());
+
+        central_repo::set_test_base_dir_override(None);
+    }
+}
+
+#[cfg(test)]
 mod sync_desired_targets_tests {
     use super::*;
     use crate::core::central_repo;
@@ -929,7 +1189,10 @@ mod sync_desired_targets_tests {
         sync_desired_targets(&store, &desired).unwrap();
 
         // Sync must have run — target should now exist with the source content.
-        assert!(target.join("SKILL.md").exists(), "missing target was not re-synced");
+        assert!(
+            target.join("SKILL.md").exists(),
+            "missing target was not re-synced"
+        );
 
         central_repo::set_test_base_dir_override(None);
     }

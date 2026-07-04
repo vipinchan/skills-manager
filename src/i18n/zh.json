@@ -978,6 +978,7 @@
     "removeButton": "移除所选 ({{count}})",
     "addedToast": "已添加 {{added}} 个 Skill-Agent 项，跳过 {{skipped}} 个已存在项。",
     "removedToast": "已移除 {{removed}} 个 Skill-Agent 项。",
+    "duplicateSkillsSkipped": "检测到同名 Skill，已只同步规范版本；跳过 {{count}} 个重复项（{{names}}）。",
     "partialFailedToast": "{{count}} 个操作失败",
     "nothingToAdd": "没有缺失 Skills 可添加",
     "nothingToRemove": "没有匹配 Skills 可移除",

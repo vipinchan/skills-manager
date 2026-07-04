@@ -109,6 +109,18 @@ export interface Preset {
   updated_at: number;
 }
 
+export interface DuplicateScenarioSkill {
+  skill_id: string;
+  skill_name: string;
+  tool: string;
+  target_name: string;
+  selected_skill_id: string;
+}
+
+export interface ScenarioSyncReport {
+  duplicate_skills: DuplicateScenarioSkill[];
+}
+
 export interface DiscoveredGroup {
   name: string;
   fingerprint: string | null;
@@ -702,10 +714,10 @@ export const deletePreset = (id: string) =>
 
 /** @deprecated v1.16+: clicking a scene no longer applies. Use applyPresetToDefault. */
 export const switchPreset = (id: string) =>
-  invoke<void>("switch_preset", { id });
+  invoke<ScenarioSyncReport>("switch_preset", { id });
 
 export const applyPresetToDefault = (id: string) =>
-  invoke<void>("apply_preset_to_default", { id });
+  invoke<ScenarioSyncReport>("apply_preset_to_default", { id });
 
 export const addSkillToPreset = (skillId: string, presetId: string) =>
   invoke<void>("add_skill_to_preset", { skillId, presetId });
