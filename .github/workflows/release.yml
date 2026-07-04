@@ -10,7 +10,24 @@ permissions:
   contents: write
 
 jobs:
+  release-mode:
+    runs-on: ubuntu-latest
+    outputs:
+      has_updater_signing_key: ${{ steps.detect.outputs.has_updater_signing_key }}
+    steps:
+      - name: Detect updater signing key
+        id: detect
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "has_updater_signing_key=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_updater_signing_key=false" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
+    needs: release-mode
     strategy:
       fail-fast: false
       matrix:
@@ -30,6 +47,8 @@ jobs:
 
     runs-on: ${{ matrix.platform }}
     name: Build (${{ matrix.label }})
+    env:
+      HAS_UPDATER_SIGNING_KEY: ${{ needs.release-mode.outputs.has_updater_signing_key }}
 
     steps:
       - name: Checkout repository
@@ -86,6 +105,19 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Disable updater artifacts when signing key is unavailable
+        if: env.HAS_UPDATER_SIGNING_KEY != 'true'
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const configPath = 'src-tauri/tauri.conf.json';
+          const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+          config.bundle = config.bundle || {};
+          config.bundle.createUpdaterArtifacts = false;
+          fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+          NODE
+
       - name: Windows smoke check
         if: matrix.platform == 'windows-latest'
         run: cargo check --manifest-path src-tauri/Cargo.toml
@@ -102,7 +134,7 @@ jobs:
           RELEASE_DATE=$(grep -m1 "^## \[${VERSION}\] - " CHANGELOG.md | sed -E "s/^## \[${VERSION}\] - ([0-9-]+).*/\1/")
           if [ -z "$RELEASE_DATE" ]; then RELEASE_DATE=$(date -u +%Y-%m-%d); fi
           # Previous tag for the commit range (skip the current tag itself).
-          PREV_TAG=$(git tag --sort=-v:refname --merged "$RELEASE_TAG" | grep -v "^${RELEASE_TAG}$" | head -n1)
+          PREV_TAG=$(git tag --sort=-v:refname --merged "$RELEASE_TAG" | grep -v "^${RELEASE_TAG}$" | head -n1 || true)
           if [ -n "$PREV_TAG" ]; then
             COMPARE_URL="https://github.com/${{ github.repository }}/compare/${PREV_TAG}...${RELEASE_TAG}"
             RANGE_LINE="递交范围：[\`${PREV_TAG}...${RELEASE_TAG}\`](${COMPARE_URL})"
@@ -184,8 +216,8 @@ jobs:
           codesign -dvvv "$APP_PATH" 2>&1 | grep -E 'Signature|Sealed Resources|Identifier'
 
   verify-updater-assets:
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/')
+    needs: [release-mode, build]
+    if: startsWith(github.ref, 'refs/tags/') && needs.release-mode.outputs.has_updater_signing_key == 'true'
     runs-on: ubuntu-latest
     name: Verify updater assets
     steps:

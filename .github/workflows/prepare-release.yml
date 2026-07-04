@@ -44,6 +44,9 @@ jobs:
       - name: Prepare release files
         run: npm run release:prepare -- ${{ inputs.release_type }}
 
+      - name: Update lockfile version
+        run: npm install --package-lock-only --ignore-scripts
+
       - name: Commit and tag
         run: |
           VERSION=$(node -p "require('./package.json').version")

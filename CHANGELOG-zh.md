@@ -5,6 +5,19 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.28.1] - 2026-07-04
+
+### 发布概览
+- 发布自动化现在可以直接通过正常版本 tag 运行：推送匹配的 `vX.Y.Z` tag 后，会自动构建桌面安装包，并发布带 updater 元数据的 GitHub Release。
+
+### 用户可见更新
+- 应用功能无变化；本版本修复项目发布流水线，确保带 tag 的 release 能可靠附上可下载构建产物和更新器文件。
+
+### 开发者与治理更新
+- release workflow 现在读取真实的 `package.json` 版本，不再发布到占位符 `v__VERSION__`；当推送的 tag 与包版本不一致时会快速失败。
+- release notes 与 compare 链接统一使用解析出的 release tag，tag push 和手动运行 workflow 都一致。
+- prepare-release workflow 现在会重新生成 lockfile，并提交所有版本相关文件，包括 `CHANGELOG-zh.md`、`package-lock.json` 和繁体中文翻译。
+
 ## [1.28.0] - 2026-07-04
 
 ### 发布概览

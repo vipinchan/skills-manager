@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.28.1] - 2026-07-04
+
+### Release Overview
+- Release automation now works from normal version tags: pushing a matching `vX.Y.Z` tag builds the desktop bundles and publishes the GitHub Release with updater metadata.
+
+### User-facing
+- No app behavior changes; this release fixes the project release pipeline so downloadable builds and updater artifacts are attached to tagged releases reliably.
+
+### Developer & Governance
+- The release workflow now resolves the real `package.json` version instead of publishing to the placeholder `v__VERSION__` release name, and fails fast when a pushed tag does not match the package version.
+- Release notes and compare links use the resolved release tag consistently for both tag pushes and manual workflow runs.
+- The prepare-release workflow now commits every versioned release file, including `CHANGELOG-zh.md`, `package-lock.json`, and Traditional Chinese translations, after regenerating the lockfile.
+
 ## [1.28.0] - 2026-07-04
 
 ### Release Overview
