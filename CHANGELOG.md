@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.28.2] - 2026-07-04
+
+### Release Overview
+- Release pipeline consolidated onto `main` as the single release branch; future releases use `main` + tags.
+
+### User-facing
+- No app behavior changes; this release completes the pipeline cleanup so all future version tags on `main` produce downloadable builds automatically.
+
+### Developer & Governance
+- Release workflow (`.github/workflows/release.yml` and `prepare-release.yml`) merged into `main` from the temporary `chore/auto-release-from-tags` branch.
+- `v1.28.1` tag moved to the merged `main` commit to anchor the release on the canonical branch.
+- Future releases follow: bump version on `main`, push tag, workflow builds assets.
 ## [1.28.1] - 2026-07-04
 
 ### Release Overview

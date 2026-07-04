@@ -5,6 +5,18 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.28.2] - 2026-07-04
+
+### 发布概览
+- 发布流水线统一到 `main` 分支，后续发版直接从 `main` 打 tag。
+
+### 用户可见更新
+- 应用功能无变化；本版本完成流水线收口，后续所有以 `main` 上的版本 tag 推送都会自动构建可下载安装包。
+
+### 开发者与治理更新
+- 将 release workflow（`release.yml` 和 `prepare-release.yml`）从临时分支 `chore/auto-release-from-tags` 合并到 `main`。
+- `v1.28.1` 标签已移动到合并后的 `main` 提交，确保版本指向规范主线。
+- 后续发版流程：在 `main` 上 bump 版本 → 打 tag 推送 → workflow 自动构建发布。
 ## [1.28.1] - 2026-07-04
 
 ### 发布概览
