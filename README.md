@@ -38,6 +38,9 @@
 <p align="center"><strong>Project Workspace</strong></p>
 <p align="center"><img src="assets/demo/project-workspace.png" width="800" alt="Project Workspace" /></p>
 
+<p align="center"><strong>Backup & Multi-Device Sync</strong></p>
+<p align="center"><img src="assets/demo/backup.png" width="800" alt="Backup and multi-device sync" /></p>
+
 <p align="center"><strong>Settings</strong></p>
 <p align="center"><img src="assets/demo/settings.png" width="800" alt="Settings" /></p>
 
