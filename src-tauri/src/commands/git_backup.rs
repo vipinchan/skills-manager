@@ -281,8 +281,7 @@ pub async fn github_device_flow_poll(
 #[tauri::command]
 pub async fn git_backup_sanitize_remote_url(url: String) -> Result<String, AppError> {
     git_fetcher::validate_git_url(&url).map_err(AppError::git)?;
-    tokio::task::spawn_blocking(move || Ok(sanitize_url_to_keychain(url.trim())))
-        .await?
+    tokio::task::spawn_blocking(move || Ok(sanitize_url_to_keychain(url.trim()))).await?
 }
 
 #[tauri::command]
@@ -860,7 +859,10 @@ mod tests {
         let name = effective_device_name(&env.store);
         assert!(!name.is_empty());
         assert_eq!(
-            env.store.get_setting("backup_device_name").unwrap().as_deref(),
+            env.store
+                .get_setting("backup_device_name")
+                .unwrap()
+                .as_deref(),
             Some(name.as_str())
         );
 
@@ -961,16 +963,23 @@ mod tests {
         git(&env.skills_dir, &["init", "-b", "main"]);
         git(
             &env.skills_dir,
-            &["remote", "add", "origin", "https://github.com/acme/repo.git"],
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/acme/repo.git",
+            ],
         );
         env.store
             .set_setting("git_backup_remote_url", "https://github.com/acme/repo.git")
             .unwrap();
 
-        let result =
-            migrate_embedded_credentials_unlocked(&env.store, &env.skills_dir).unwrap();
+        let result = migrate_embedded_credentials_unlocked(&env.store, &env.skills_dir).unwrap();
         assert_eq!(result, None);
-        assert_eq!(origin_url(&env.skills_dir), "https://github.com/acme/repo.git");
+        assert_eq!(
+            origin_url(&env.skills_dir),
+            "https://github.com/acme/repo.git"
+        );
     }
 
     #[test]
@@ -982,7 +991,12 @@ mod tests {
         git(&env.skills_dir, &["init", "-b", "main"]);
         git(
             &env.skills_dir,
-            &["remote", "add", "origin", "https://github.com/acme/repo.git"],
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/acme/repo.git",
+            ],
         );
         env.store
             .set_setting("git_backup_remote_url", "https://github.com/acme/repo.git")
@@ -991,7 +1005,10 @@ mod tests {
         disconnect_local(&env.store, &env.skills_dir).unwrap();
         assert_eq!(origin_url(&env.skills_dir), "");
         assert_eq!(
-            env.store.get_setting("git_backup_remote_url").unwrap().as_deref(),
+            env.store
+                .get_setting("git_backup_remote_url")
+                .unwrap()
+                .as_deref(),
             Some("")
         );
 
@@ -1012,11 +1029,13 @@ mod tests {
             )
             .unwrap();
 
-        let result =
-            migrate_embedded_credentials_unlocked(&env.store, &env.skills_dir).unwrap();
+        let result = migrate_embedded_credentials_unlocked(&env.store, &env.skills_dir).unwrap();
         assert_eq!(result.as_deref(), Some("https://github.com/acme/repo.git"));
         assert_eq!(
-            env.store.get_setting("git_backup_remote_url").unwrap().as_deref(),
+            env.store
+                .get_setting("git_backup_remote_url")
+                .unwrap()
+                .as_deref(),
             Some("https://github.com/acme/repo.git")
         );
     }
@@ -1046,7 +1065,10 @@ mod tests {
         );
         assert_eq!(origin_url(&env.skills_dir), token_url);
         assert_eq!(
-            env.store.get_setting("git_backup_remote_url").unwrap().as_deref(),
+            env.store
+                .get_setting("git_backup_remote_url")
+                .unwrap()
+                .as_deref(),
             Some(token_url)
         );
     }

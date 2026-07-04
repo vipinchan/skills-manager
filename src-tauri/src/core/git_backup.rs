@@ -70,7 +70,11 @@ pub struct GitBackupVersion {
 /// `.local`, which is noise for a display name).
 pub fn default_device_name() -> String {
     let host = gethostname::gethostname().to_string_lossy().to_string();
-    let host = host.strip_suffix(".local").unwrap_or(&host).trim().to_string();
+    let host = host
+        .strip_suffix(".local")
+        .unwrap_or(&host)
+        .trim()
+        .to_string();
     if host.is_empty() {
         "My Computer".to_string()
     } else {
@@ -356,7 +360,8 @@ pub(crate) fn set_remote_unlocked(skills_dir: &Path, url: &str) -> Result<()> {
     // upstream the first push must use `-u` and the "ahead" count reads 0.
     // Logging it here is what makes "Sync says up to date but remote is empty"
     // diagnosable from a single log line.
-    let upstream_tracking = run_git(skills_dir, &["rev-parse", "--abbrev-ref", "@{upstream}"]).is_ok();
+    let upstream_tracking =
+        run_git(skills_dir, &["rev-parse", "--abbrev-ref", "@{upstream}"]).is_ok();
     log::info!("git set_remote: origin configured on branch {branch}, upstream_tracking={upstream_tracking}");
 
     Ok(())
@@ -1053,7 +1058,10 @@ pub(crate) fn clone_into_unlocked(skills_dir: &Path, url: &str) -> Result<()> {
                 let stderr = String::from_utf8_lossy(&o.stderr);
                 let detail = stderr.trim();
                 if detail.is_empty() {
-                    Err(anyhow::anyhow!("git clone failed with exit code {}", o.status))
+                    Err(anyhow::anyhow!(
+                        "git clone failed with exit code {}",
+                        o.status
+                    ))
                 } else {
                     Err(anyhow::anyhow!(
                         "git clone failed: {}",
@@ -1441,7 +1449,11 @@ fn run_git_env_checked(dir: &Path, args: &[&str], envs: &[(String, String)]) -> 
         // (commit, push -u, fetch+merge, tag, read-tree, …) goes through here,
         // so this is where "sync silently failed" becomes visible in the log.
         // Redact the args because some carry the remote URL (which may embed a token).
-        log::warn!("git failed [{}]: {}", redact_urls_in_text(&args.join(" ")), e);
+        log::warn!(
+            "git failed [{}]: {}",
+            redact_urls_in_text(&args.join(" ")),
+            e
+        );
         return Err(e);
     }
     Ok(())
@@ -1610,12 +1622,20 @@ mod tests {
         assert_eq!(sanitize_device_name("evil<\n>name"), "evilname");
         assert_eq!(sanitize_device_name("公司 Windows"), "公司 Windows");
         assert_eq!(sanitize_device_name("<>"), "");
-        assert_eq!(sanitize_device_name("a".repeat(100).as_str()).chars().count(), 64);
+        assert_eq!(
+            sanitize_device_name("a".repeat(100).as_str())
+                .chars()
+                .count(),
+            64
+        );
     }
 
     #[test]
     fn device_email_slugs_name_with_fallback() {
-        assert_eq!(device_email("MacBook Pro"), "macbook-pro@skills-manager.local");
+        assert_eq!(
+            device_email("MacBook Pro"),
+            "macbook-pro@skills-manager.local"
+        );
         assert_eq!(device_email("公司 Windows"), "windows@skills-manager.local");
         assert_eq!(device_email("公司"), "device@skills-manager.local");
     }
@@ -1632,7 +1652,10 @@ mod tests {
         // Init must succeed and author the initial commit as the device,
         // regardless of any global git identity on this machine.
         init_repo_unlocked(dir, "MacBook Pro").unwrap();
-        assert_eq!(run_git(dir, &["log", "-1", "--format=%an"]).unwrap(), "MacBook Pro");
+        assert_eq!(
+            run_git(dir, &["log", "-1", "--format=%an"]).unwrap(),
+            "MacBook Pro"
+        );
         assert_eq!(
             run_git(dir, &["config", "--local", "--get", "user.email"]).unwrap(),
             "macbook-pro@skills-manager.local"
@@ -1642,7 +1665,10 @@ mod tests {
         configure_device_identity(dir, "公司 Windows").unwrap();
         std::fs::write(dir.join("note.md"), "x").unwrap();
         commit_all_unlocked(dir, "backup").unwrap();
-        assert_eq!(run_git(dir, &["log", "-1", "--format=%an"]).unwrap(), "公司 Windows");
+        assert_eq!(
+            run_git(dir, &["log", "-1", "--format=%an"]).unwrap(),
+            "公司 Windows"
+        );
 
         // And the snapshot history exposes the author per entry.
         let tag = create_snapshot_tag_unlocked(dir).unwrap();
@@ -1923,8 +1949,17 @@ mod tests {
             .success());
 
         let git = |args: &[&str]| {
-            let out = Command::new("git").arg("-C").arg(&work).args(args).output().unwrap();
-            assert!(out.status.success(), "git {args:?} failed: {}", String::from_utf8_lossy(&out.stderr));
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(&work)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
         };
         git(&["init", "-b", "main"]);
         git(&["config", "user.email", "test@example.com"]);
@@ -1958,8 +1993,17 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
         let git = |args: &[&str]| {
-            let out = Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
-            assert!(out.status.success(), "git {args:?} failed: {}", String::from_utf8_lossy(&out.stderr));
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
         };
         git(&["init", "-b", "main"]);
         git(&["config", "user.email", "test@example.com"]);
@@ -1980,7 +2024,10 @@ mod tests {
         let safety_tag = restore_snapshot_version_unlocked(dir, &old_tag).unwrap();
 
         // Working tree is back at v1.
-        assert_eq!(std::fs::read_to_string(dir.join("skill-a/SKILL.md")).unwrap(), "v1");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("skill-a/SKILL.md")).unwrap(),
+            "v1"
+        );
         // The safety point is a persistent user-visible snapshot of the
         // pre-restore state, including the dirty edit.
         assert!(safety_tag.starts_with("sm-v-"));
@@ -2057,7 +2104,12 @@ mod tests {
             .success());
         run_git_checked(
             dir,
-            &["remote", "add", "origin", "https://github.com/acme/repo.git"],
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/acme/repo.git",
+            ],
         )
         .unwrap();
 
@@ -2106,7 +2158,9 @@ mod tests {
         // Pin autoSetupRemote off in the repo's local config so the plain `git push`
         // deterministically fails and we actually exercise the `-u` fallback, even on
         // a dev box whose global config sets push.autoSetupRemote=true.
-        assert!(git(&["config", "push.autoSetupRemote", "false"]).status.success());
+        assert!(git(&["config", "push.autoSetupRemote", "false"])
+            .status
+            .success());
         std::fs::write(work.join("a.txt"), "hello").unwrap();
         assert!(git(&["add", "-A"]).status.success());
         assert!(git(&["commit", "-m", "initial"]).status.success());
@@ -2218,7 +2272,11 @@ mod tests {
         std::fs::write(a.join("skill.md"), "base\n").unwrap();
         assert!(git(&a, &["add", "-A"]).status.success());
         assert!(git(&a, &["commit", "-m", "base"]).status.success());
-        assert!(git(&a, &["remote", "add", "origin", remote.to_str().unwrap()]).status.success());
+        assert!(
+            git(&a, &["remote", "add", "origin", remote.to_str().unwrap()])
+                .status
+                .success()
+        );
         assert!(git(&a, &["push", "-u", "origin", "main"]).status.success());
 
         // Machine B: clone, then both sides edit the SAME line differently.
@@ -2229,7 +2287,9 @@ mod tests {
             .unwrap()
             .status
             .success());
-        assert!(git(&b, &["config", "user.email", "test@example.com"]).status.success());
+        assert!(git(&b, &["config", "user.email", "test@example.com"])
+            .status
+            .success());
         assert!(git(&b, &["config", "user.name", "Test"]).status.success());
 
         std::fs::write(a.join("skill.md"), "edited on A\n").unwrap();
