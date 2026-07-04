@@ -34,6 +34,9 @@
 <p align="center"><strong>项目工作区</strong></p>
 <p align="center"><img src="assets/demo/project-workspace.png" width="800" alt="项目工作区" /></p>
 
+<p align="center"><strong>备份与多设备同步</strong></p>
+<p align="center"><img src="assets/demo/backup.png" width="800" alt="备份与多设备同步" /></p>
+
 <p align="center"><strong>设置</strong></p>
 <p align="center"><img src="assets/demo/settings.png" width="800" alt="设置" /></p>
 
