@@ -3,7 +3,7 @@ import { Check, Loader2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { cn } from "../utils";
-import { computePresetStatus } from "../lib/presetStatus";
+import { canonicalPresetSkills, computePresetStatus } from "../lib/presetStatus";
 import { getPresetIconOption } from "../lib/presetIcons";
 import type { ManagedSkill, Preset } from "../lib/tauri";
 import { getErrorMessage } from "../lib/error";
@@ -47,13 +47,24 @@ export function PresetBar({
     setLoadingKey(`${preset.id}-add`);
     try {
       const presetSkills = managedSkills.filter((s) => s.preset_ids.includes(preset.id));
+      const canonicalSkills = canonicalPresetSkills(preset, managedSkills);
+      const duplicateCount = presetSkills.length - canonicalSkills.length;
       let added = 0, skipped = 0, failed = 0;
-      for (const skill of presetSkills) {
+      for (const skill of canonicalSkills) {
         for (const agentKey of agentKeys) {
           if (existsInWorkspace(skill, agentKey)) { skipped++; continue; }
           try { await onAddSkill(skill, agentKey); added++; }
           catch { failed++; }
         }
+      }
+      if (duplicateCount > 0) {
+        const duplicateNames = Array.from(
+          new Set(presetSkills.map((skill) => skill.name))
+        ).filter((name) => presetSkills.filter((skill) => skill.name === name).length > 1);
+        toast.warning(t("presetActions.duplicateSkillsSkipped", {
+          count: duplicateCount * agentKeys.length,
+          names: duplicateNames.slice(0, 3).join(", "),
+        }));
       }
       if (added > 0) {
         toast.success(t("presetActions.addedToast", { added, skipped }));

@@ -151,7 +151,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const handleApplyPresetToDefault = useCallback(
     async (id: string) => {
-      await api.applyPresetToDefault(id);
+      const report = await api.applyPresetToDefault(id);
+      const duplicateCount = report.duplicate_skills.length;
+      if (duplicateCount > 0) {
+        const names = Array.from(new Set(report.duplicate_skills.map((item) => item.skill_name)))
+          .slice(0, 3)
+          .join(", ");
+        toast.warning(i18n.t("presetActions.duplicateSkillsSkipped", { count: duplicateCount, names }));
+      }
       await Promise.all([refreshPresets(), refreshManagedSkills()]);
     },
     [refreshManagedSkills, refreshPresets]

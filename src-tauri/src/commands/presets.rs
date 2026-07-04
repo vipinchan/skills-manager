@@ -6,10 +6,11 @@ use tauri::State;
 
 use crate::core::{
     error::AppError,
-    scenario_service::{self, BatchApplyMode},
+    scenario_service::{self, BatchApplyMode, ScenarioSyncReport},
     skill_store::{ScenarioRecord, SkillStore},
-    sync_metadata, tool_adapters,
+    sync_metadata,
     timing::should_log_first_or_slow,
+    tool_adapters,
 };
 
 fn refresh_tray_menu_best_effort(app: &tauri::AppHandle) {
@@ -234,7 +235,7 @@ pub async fn apply_preset_to_default(
     app: tauri::AppHandle,
     id: String,
     store: State<'_, Arc<SkillStore>>,
-) -> Result<(), AppError> {
+) -> Result<ScenarioSyncReport, AppError> {
     apply_preset_to_default_impl(app, id, store.inner().clone()).await
 }
 
@@ -246,7 +247,7 @@ pub async fn switch_preset(
     app: tauri::AppHandle,
     id: String,
     store: State<'_, Arc<SkillStore>>,
-) -> Result<(), AppError> {
+) -> Result<ScenarioSyncReport, AppError> {
     apply_preset_to_default_impl(app, id, store.inner().clone()).await
 }
 
@@ -254,9 +255,9 @@ async fn apply_preset_to_default_impl(
     app: tauri::AppHandle,
     id: String,
     store: Arc<SkillStore>,
-) -> Result<(), AppError> {
+) -> Result<ScenarioSyncReport, AppError> {
     let result = tauri::async_runtime::spawn_blocking(move || {
-        scenario_service::apply_scenario_to_default(&store, &id)
+        scenario_service::apply_scenario_to_default_with_report(&store, &id)
     })
     .await?;
     if result.is_ok() {
