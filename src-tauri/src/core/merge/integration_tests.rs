@@ -611,6 +611,73 @@ fn remote_deletion_leaves_local_ignored_files_untouched() {
     );
 }
 
+#[test]
+fn legacy_dirt_does_not_brick_the_merge() {
+    // Real-world incident (2026-07-05, Linus-PC): shared history carried two
+    // unclaimed skill dirs (committed by old versions with no metadata) and
+    // the remote tip carried a committed atomic-write temp file under the
+    // metadata namespace — every merge aborted with "zero changes" forever.
+    let env = setup();
+    let a = env.device_a();
+    a.write_skill("skill-1", "alpha", "base");
+    // Legacy dirt in the SEED (shared history): an unclaimed skill dir.
+    std::fs::create_dir_all(a.skills.join("ghost")).unwrap();
+    std::fs::write(a.skills.join("ghost/SKILL.md"), "no metadata owns me").unwrap();
+    a.commit("seed with ghost");
+    a.push();
+    let b = env.device_b();
+
+    // B (the remote side) additionally commits a temp metadata leftover.
+    b.activate();
+    std::fs::write(
+        b.skills.join(".skills-manager/skills/skill-1.json.tmp.0000-dead-beef"),
+        "partial write leftover",
+    )
+    .unwrap();
+    std::fs::write(b.skills.join("alpha/SKILL.md"), "edited on B").unwrap();
+    b.commit("edit + leaked tmp file");
+    b.push();
+
+    // A diverges so this is a real merge, then pulls.
+    a.activate();
+    a.write_skill("skill-2", "beta", "local addition");
+    a.commit("local");
+    let summary = a.pull();
+    assert!(summary.new_conflicts.is_empty(), "{summary:?}");
+
+    // The ghost dir is tolerated (grandfathered) and still present…
+    assert_eq!(a.skill_md("ghost"), "no metadata owns me");
+    // …while the temp metadata file was dropped from the merged tree.
+    let tracked = git(&a.skills, &["ls-tree", "-r", "HEAD", "--name-only"]);
+    assert!(
+        !tracked.contains(".tmp."),
+        "temp metadata junk must not survive the merge: {tracked}"
+    );
+    assert_eq!(a.skill_md("alpha"), "edited on B");
+}
+
+#[test]
+fn commit_never_picks_up_tmp_metadata_leftovers() {
+    // The pushing-only device (never reconciles) must not commit atomic-write
+    // leftovers in the first place.
+    let env = setup();
+    let a = env.device_a();
+    a.write_skill("skill-1", "alpha", "base");
+    std::fs::write(
+        a.skills.join(".skills-manager/skills/skill-1.json.tmp.0000-dead-beef"),
+        "leftover",
+    )
+    .unwrap();
+    a.commit("seed");
+    let tracked = git(&a.skills, &["ls-tree", "-r", "HEAD", "--name-only"]);
+    assert!(!tracked.contains(".tmp."), "{tracked}");
+    // The leftover is gone from disk too, not just unstaged.
+    assert!(!a
+        .skills
+        .join(".skills-manager/skills/skill-1.json.tmp.0000-dead-beef")
+        .exists());
+}
+
 // ── crash recovery (§5 启动恢复协议) ──
 
 /// Builds a repo state crashed between branch-move (step 9) and checkout

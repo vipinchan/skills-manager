@@ -221,6 +221,14 @@ pub fn decide(input: &DecisionInput) -> Result<MergePlan> {
         plan.scenarios.contains_key(sid) && plan.skills.contains_key(skid)
     });
 
+    // ── metadata-namespace junk drop (构树输入自愈): legacy trees carry
+    // atomic-write leftovers (`x.json.tmp.<uuid>`) and OS noise inside the
+    // metadata subdirectories — an old client committed them before disk
+    // cleanup ran. The app only ever writes `.json` files there, so any
+    // other residual is junk; merging it forward would trip the strict
+    // validator on every device forever.
+    plan.residual.retain(|path, _| !is_metadata_namespace_junk(path));
+
     resolve_path_collisions(&mut plan, input)?;
     Ok(plan)
 }
@@ -453,6 +461,22 @@ fn resolve_path_collisions(plan: &mut MergePlan, input: &DecisionInput) -> Resul
         }
     }
     Ok(())
+}
+
+/// Residual files inside the managed metadata subdirectories that the app
+/// never writes: anything non-`.json` under skills/scenarios/scenario-skills,
+/// plus atomic-write temp leftovers anywhere under `.skills-manager/`.
+fn is_metadata_namespace_junk(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix(".skills-manager/") else {
+        return false;
+    };
+    if rest.contains(".tmp.") {
+        return true;
+    }
+    (rest.starts_with("skills/")
+        || rest.starts_with("scenarios/")
+        || rest.starts_with("scenario-skills/"))
+        && !rest.ends_with(".json")
 }
 
 fn suffixed_path(path: &str, n: u32) -> String {

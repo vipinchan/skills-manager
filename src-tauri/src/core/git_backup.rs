@@ -440,6 +440,11 @@ pub fn commit_all(skills_dir: &Path, message: &str) -> Result<()> {
 pub(crate) fn commit_all_unlocked(skills_dir: &Path, message: &str) -> Result<()> {
     ensure_repo(skills_dir)?;
     ensure_gitignore(skills_dir)?;
+    // Atomic-write leftovers must never enter a commit: a committed
+    // `x.json.tmp.<uuid>` trips the merge validator on every other device.
+    // (Reconcile also cleans these, but a machine that only ever pushes
+    // never reconciles.)
+    remove_tmp_metadata_files(skills_dir);
     // §3.6: new oversized skills stay local, out of the backup.
     if let Err(e) = apply_oversized_exclusions(skills_dir, SKILL_SIZE_LIMIT_BYTES) {
         log::warn!("backup size: exclusion scan failed (continuing): {e:#}");
@@ -517,6 +522,7 @@ pub fn prune_hidden_refs_on_remote(skills_dir: &Path) -> Result<usize> {
 pub(crate) fn commit_resolution_unlocked(skills_dir: &Path, full_message: &str) -> Result<()> {
     ensure_repo(skills_dir)?;
     ensure_gitignore(skills_dir)?;
+    remove_tmp_metadata_files(skills_dir);
     if let Err(e) = apply_oversized_exclusions(skills_dir, SKILL_SIZE_LIMIT_BYTES) {
         log::warn!("backup size: exclusion scan failed (continuing): {e:#}");
     }
@@ -1347,6 +1353,33 @@ fn ensure_repo(skills_dir: &Path) -> Result<()> {
         anyhow::bail!("Skills directory is not a git repository. Initialize it first.");
     }
     Ok(())
+}
+
+/// Delete atomic-write temp leftovers (`*.tmp.<uuid>`) under the metadata
+/// namespace of THIS repo's working tree. Best-effort; a leftover appears
+/// only when a writer crashed mid-write.
+fn remove_tmp_metadata_files(skills_dir: &Path) {
+    let meta_root = skills_dir.join(".skills-manager");
+    if !meta_root.exists() {
+        return;
+    }
+    for entry in walkdir::WalkDir::new(&meta_root).into_iter().flatten() {
+        if entry.file_type().is_file()
+            && entry.file_name().to_string_lossy().contains(".tmp.")
+        {
+            if let Err(e) = std::fs::remove_file(entry.path()) {
+                log::warn!(
+                    "git commit: failed to remove temp metadata file {}: {e}",
+                    entry.path().display()
+                );
+            } else {
+                log::info!(
+                    "git commit: removed stale temp metadata file {}",
+                    entry.path().display()
+                );
+            }
+        }
+    }
 }
 
 pub(crate) fn ensure_no_interrupted_git_operation(skills_dir: &Path) -> Result<()> {

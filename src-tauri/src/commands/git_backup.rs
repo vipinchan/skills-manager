@@ -13,6 +13,13 @@ use crate::core::skill_store::SkillStore;
 
 static FETCH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
+/// Classify a git failure keeping the full anyhow cause chain: the top-level
+/// context alone ("object merge aborted…") hides the actual reason (e.g.
+/// which validation rule failed), which is what the failure card must show.
+fn classify_git_chain(e: anyhow::Error) -> AppError {
+    AppError::classify_git_error(format!("{e:#}"))
+}
+
 /// Push the persisted engine choice (`git_backup_engine` = "git2" | "system")
 /// and proxy setting into the core layer, which has no store access. Called
 /// at the entry of every command that can touch the network.
@@ -209,7 +216,7 @@ fn connect_with_token(
         .map_err(AppError::db)?;
 
     let remote_has_content =
-        git_backup::remote_has_heads(&info.url).map_err(AppError::classify_git_error)?;
+        git_backup::remote_has_heads(&info.url).map_err(classify_git_chain)?;
 
     Ok(GithubBackupConnectResult {
         url: info.url,
@@ -295,7 +302,7 @@ pub async fn git_backup_set_remote(
     let skills_dir = central_repo::skills_dir();
     tokio::task::spawn_blocking(move || {
         let effective = sanitize_url_to_keychain(url.trim());
-        git_backup::set_remote(&skills_dir, &effective).map_err(AppError::classify_git_error)?;
+        git_backup::set_remote(&skills_dir, &effective).map_err(classify_git_chain)?;
         Ok(effective)
     })
     .await?
@@ -360,7 +367,7 @@ pub async fn git_backup_push(store: State<'_, Arc<SkillStore>>) -> Result<(), Ap
     let store = store.inner().clone();
     let skills_dir = central_repo::skills_dir();
     tokio::task::spawn_blocking(move || {
-        git_backup::push(&skills_dir).map_err(AppError::classify_git_error)?;
+        git_backup::push(&skills_dir).map_err(classify_git_chain)?;
         // A successful manual push also resolves any lingering auto-backup
         // failure — the persistent failure card must not outlive the problem.
         let _ = store.set_setting(crate::core::auto_backup::SETTING_LAST_ERROR, "");
@@ -398,7 +405,7 @@ pub async fn git_backup_pull(
             );
             Ok(summary)
         })
-        .map_err(AppError::classify_git_error)
+        .map_err(classify_git_chain)
     })
     .await?
 }
@@ -430,7 +437,7 @@ pub async fn git_backup_sync(
     let skills_dir = central_repo::skills_dir();
     tokio::task::spawn_blocking(move || {
         git_backup::with_repo_lock("git sync", || run_sync_blocking(&store, &skills_dir, &message))
-            .map_err(AppError::classify_git_error)
+            .map_err(classify_git_chain)
     })
     .await?
 }
@@ -564,7 +571,7 @@ pub async fn git_backup_resolve_conflict(
             );
             Ok(safety_tag)
         })
-        .map_err(AppError::classify_git_error)
+        .map_err(classify_git_chain)
     })
     .await?
 }
@@ -585,7 +592,7 @@ pub async fn git_backup_clone(
             apply_device_identity(&store, &skills_dir);
             reconcile_skills_index_unlocked(&store)
         })
-        .map_err(AppError::classify_git_error)
+        .map_err(classify_git_chain)
     })
     .await?
 }
@@ -609,7 +616,7 @@ pub async fn git_backup_reclone(
             apply_device_identity(&store, &skills_dir);
             reconcile_skills_index_unlocked(&store)
         })
-        .map_err(AppError::classify_git_error)
+        .map_err(classify_git_chain)
     })
     .await?
 }

@@ -14,7 +14,7 @@ use super::pending::{
 use super::protocol::{self, ProtocolFile};
 use super::snapshot::{self, FileEntry, METADATA_DIR, Snapshot, skill_identical};
 use super::treebuild::{TreeEdit, apply_tree_edits};
-use super::validate::validate_merged_tree;
+use super::validate::{self, validate_merged_tree};
 use crate::core::skill_store::{PendingConflictRow, SkillStore};
 use crate::core::sync_metadata;
 use crate::core::{git_backup, repo_lock::RepoLock};
@@ -180,11 +180,17 @@ pub fn object_merge_pull_unlocked(store: &SkillStore, skills_dir: &Path) -> Resu
         theirs_touch: &theirs_touch_simple,
     })?;
 
-    // §5 steps 4–5: build + validate the merged tree.
+    // §5 steps 4–5: build + validate the merged tree. Skill dirs that were
+    // already unclaimed in either input tip (legacy dirt from old versions)
+    // are grandfathered — the validator only rejects orphans the merge
+    // itself would introduce.
     let edits = plan_to_edits(&repo, &ours_snap, &theirs_snap, &plan)?;
     let merged_tree_oid = apply_tree_edits(&repo, Some(&ours_tree), &edits)?;
     let merged_tree = repo.find_tree(merged_tree_oid)?;
-    validate_merged_tree(&repo, &merged_tree).context("object merge aborted (zero changes)")?;
+    let mut tolerated = validate::unclaimed_skill_dirs(&repo, &ours_tree)?;
+    tolerated.extend(validate::unclaimed_skill_dirs(&repo, &theirs_tree)?);
+    validate_merged_tree(&repo, &merged_tree, &tolerated)
+        .context("object merge aborted (zero changes)")?;
 
     // §5 忽略文件注: paths the checkout would create must not be shadowed by
     // untracked/ignored files on disk — explicit error, never a silent FORCE.
@@ -446,7 +452,10 @@ fn check_old_client_writes(
             continue;
         }
         let tree = repo.find_commit(tip)?.tree()?;
-        validate_merged_tree(repo, &tree).with_context(|| {
+        // Legacy unclaimed dirs in the tip are tolerated here for the same
+        // reason as in the merge itself; the structural checks still apply.
+        let tolerated = validate::unclaimed_skill_dirs(repo, &tree)?;
+        validate_merged_tree(repo, &tree, &tolerated).with_context(|| {
             format!(
                 "sync blocked: an old skills-manager version wrote to the {label} library and left it inconsistent — upgrade that device and repair via the recovery flow"
             )

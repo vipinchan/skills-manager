@@ -11,7 +11,39 @@ use super::protocol::ProtocolFile;
 use super::snapshot::{MAX_SKILL_DEPTH, METADATA_DIR, tree_is_valid_skill_dir};
 use crate::core::sync_metadata::{SkillMetaFile, path_key};
 
-pub fn validate_merged_tree(repo: &Repository, tree: &Tree) -> Result<()> {
+/// Skill directories in `tree` that no metadata claims. Used to grandfather
+/// legacy dirt: dirs that were already unclaimed in a merge INPUT (committed
+/// long ago by old app versions or by hand) must not brick every future
+/// merge — the invariant defends against merges *introducing* orphans, not
+/// against pre-existing ones. Best-effort: unparsable metadata files simply
+/// contribute no claim here (the strict checks still run on the merged tree).
+pub fn unclaimed_skill_dirs(repo: &Repository, tree: &Tree) -> Result<BTreeSet<String>> {
+    let mut claimed: BTreeSet<String> = BTreeSet::new();
+    if let Some(meta_entry) = tree.get_name(METADATA_DIR) {
+        if let Ok(meta_tree) = repo.find_tree(meta_entry.id()) {
+            if let Ok(skills_tree) = subtree(repo, &meta_tree, "skills") {
+                for entry in skills_tree.iter() {
+                    if let Ok(blob) = repo.find_blob(entry.id()) {
+                        if let Ok(meta) = serde_json::from_slice::<SkillMetaFile>(blob.content())
+                        {
+                            claimed.insert(meta.path);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let claimed_refs: BTreeSet<&str> = claimed.iter().map(String::as_str).collect();
+    let mut out = BTreeSet::new();
+    collect_unclaimed(repo, tree, "", &claimed_refs, 0, &mut out)?;
+    Ok(out)
+}
+
+pub fn validate_merged_tree(
+    repo: &Repository,
+    tree: &Tree,
+    tolerated_unclaimed: &BTreeSet<String>,
+) -> Result<()> {
     let meta_tree = subtree(repo, tree, METADATA_DIR)
         .context("merged tree validation: .skills-manager missing")?;
 
@@ -113,9 +145,21 @@ pub fn validate_merged_tree(repo: &Repository, tree: &Tree) -> Result<()> {
     }
 
     // 4. every valid skill dir at any depth (dot-dirs excluded) is claimed
-    //    by exactly one metadata entry. Claimed dirs are not descended: a
-    //    SKILL.md in a skill's own subfolder belongs to that skill.
-    walk_unclaimed(repo, tree, "", &claimed, 0)?;
+    //    by exactly one metadata entry — except dirs grandfathered by the
+    //    caller (already unclaimed in a merge input; the merge must not
+    //    INTRODUCE orphans, but pre-existing legacy dirt syncs through).
+    //    Claimed dirs are not descended: a SKILL.md in a skill's own
+    //    subfolder belongs to that skill.
+    let mut unclaimed = BTreeSet::new();
+    collect_unclaimed(repo, tree, "", &claimed, 0, &mut unclaimed)?;
+    for dir in unclaimed {
+        if !tolerated_unclaimed.contains(&dir) {
+            bail!(
+                "merged tree validation: unclaimed skill directory '{}' (no metadata owns it)",
+                dir
+            );
+        }
+    }
 
     // 5. membership / scenario reference completeness.
     let mut scenario_ids: BTreeSet<String> = BTreeSet::new();
@@ -173,12 +217,13 @@ fn blob_of(repo: &Repository, tree: &Tree, name: &str) -> Result<Vec<u8>> {
         .to_vec())
 }
 
-fn walk_unclaimed(
+fn collect_unclaimed(
     repo: &Repository,
     tree: &Tree,
     prefix: &str,
     claimed: &BTreeSet<&str>,
     depth: usize,
+    out: &mut BTreeSet<String>,
 ) -> Result<()> {
     if depth >= MAX_SKILL_DEPTH {
         // Deliberately mirrors reconcile's WalkDir max_depth(6) horizon: a
@@ -205,12 +250,10 @@ fn walk_unclaimed(
         }
         let dir = repo.find_tree(entry.id())?;
         if tree_is_valid_skill_dir(&dir) {
-            bail!(
-                "merged tree validation: unclaimed skill directory '{}' (no metadata owns it)",
-                path
-            );
+            out.insert(path);
+            continue;
         }
-        walk_unclaimed(repo, &dir, &path, claimed, depth + 1)?;
+        collect_unclaimed(repo, &dir, &path, claimed, depth + 1, out)?;
     }
     Ok(())
 }
