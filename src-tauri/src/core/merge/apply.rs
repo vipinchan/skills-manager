@@ -452,10 +452,11 @@ fn check_old_client_writes(
             continue;
         }
         let tree = repo.find_commit(tip)?.tree()?;
-        // Legacy unclaimed dirs in the tip are tolerated here for the same
-        // reason as in the merge itself; the structural checks still apply.
+        // Legacy unclaimed dirs and committed metadata junk in the tip are
+        // tolerated here for the same reason as in the merge itself; the
+        // structural checks still apply.
         let tolerated = validate::unclaimed_skill_dirs(repo, &tree)?;
-        validate_merged_tree(repo, &tree, &tolerated).with_context(|| {
+        validate::validate_input_tip(repo, &tree, &tolerated).with_context(|| {
             format!(
                 "sync blocked: an old skills-manager version wrote to the {label} library and left it inconsistent — upgrade that device and repair via the recovery flow"
             )

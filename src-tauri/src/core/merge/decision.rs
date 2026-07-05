@@ -466,7 +466,7 @@ fn resolve_path_collisions(plan: &mut MergePlan, input: &DecisionInput) -> Resul
 /// Residual files inside the managed metadata subdirectories that the app
 /// never writes: anything non-`.json` under skills/scenarios/scenario-skills,
 /// plus atomic-write temp leftovers anywhere under `.skills-manager/`.
-fn is_metadata_namespace_junk(path: &str) -> bool {
+pub(crate) fn is_metadata_namespace_junk(path: &str) -> bool {
     let Some(rest) = path.strip_prefix(".skills-manager/") else {
         return false;
     };

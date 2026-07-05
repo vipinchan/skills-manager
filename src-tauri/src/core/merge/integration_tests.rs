@@ -627,7 +627,10 @@ fn legacy_dirt_does_not_brick_the_merge() {
     a.push();
     let b = env.device_b();
 
-    // B (the remote side) additionally commits a temp metadata leftover.
+    // B (the remote side) additionally has a temp metadata leftover already
+    // COMMITTED in history (as the incident device did, with the protocol
+    // trailer) — raw git here, because the app's own commit paths now clean
+    // temp files before committing and would defeat the scenario.
     b.activate();
     std::fs::write(
         b.skills.join(".skills-manager/skills/skill-1.json.tmp.0000-dead-beef"),
@@ -635,8 +638,19 @@ fn legacy_dirt_does_not_brick_the_merge() {
     )
     .unwrap();
     std::fs::write(b.skills.join("alpha/SKILL.md"), "edited on B").unwrap();
-    b.commit("edit + leaked tmp file");
+    git(&b.skills, &["add", "-A"]);
+    git(&b.skills, &[
+        "commit",
+        "-m",
+        "backup: edit + leaked tmp file\n\nSkills-Manager-Protocol: 2",
+    ]);
+    b.reindex();
     b.push();
+    // Preconditions: the junk really is in the remote history.
+    assert!(
+        git(&b.skills, &["ls-tree", "-r", "HEAD", "--name-only"]).contains(".tmp."),
+        "setup: tmp file must be committed"
+    );
 
     // A diverges so this is a real merge, then pulls.
     a.activate();
@@ -922,10 +936,19 @@ fn old_client_plain_write_passes_with_warning() {
     let (a, b) = seeded_pair(&env);
 
     // B: a raw single-parent commit editing skill content — tolerated after
-    // validation, but flagged.
+    // validation, but flagged. It also carries a committed temp metadata
+    // leftover: the input-tip validation must treat that as legacy dirt, not
+    // block (codex review finding: the tip check ran before the plan-stage
+    // junk drop and hard-failed on it).
     b.activate();
     std::fs::write(b.skills.join("alpha/SKILL.md"), "raw git edit").unwrap();
-    git(&b.skills, &["commit", "-am", "raw edit without trailer"]);
+    std::fs::write(
+        b.skills.join(".skills-manager/skills/skill-1.json.tmp.0000-dead-beef"),
+        "leftover",
+    )
+    .unwrap();
+    git(&b.skills, &["add", "-A"]);
+    git(&b.skills, &["commit", "-m", "raw edit without trailer"]);
     git(&b.skills, &["push", "origin", "main"]);
 
     a.activate();
@@ -934,6 +957,9 @@ fn old_client_plain_write_passes_with_warning() {
     let summary = a.pull();
     assert!(summary.old_client_warning.is_some(), "{summary:?}");
     assert_eq!(a.skill_md("alpha"), "raw git edit");
+    // The committed junk was dropped from the merged tree, not adopted.
+    let tracked = git(&a.skills, &["ls-tree", "-r", "HEAD", "--name-only"]);
+    assert!(!tracked.contains(".tmp."), "{tracked}");
 }
 
 #[test]

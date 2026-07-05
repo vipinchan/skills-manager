@@ -44,6 +44,28 @@ pub fn validate_merged_tree(
     tree: &Tree,
     tolerated_unclaimed: &BTreeSet<String>,
 ) -> Result<()> {
+    validate_tree(repo, tree, tolerated_unclaimed, false)
+}
+
+/// Validation for a merge INPUT tip (old-client checks): same rules, but
+/// metadata-namespace junk (committed `.tmp.` leftovers etc.) is legacy dirt
+/// the plan stage drops anyway — a tip carrying it must not hard-block. The
+/// merged tree itself stays strict: the planner guarantees junk-free output,
+/// so junk there means an engine bug.
+pub fn validate_input_tip(
+    repo: &Repository,
+    tree: &Tree,
+    tolerated_unclaimed: &BTreeSet<String>,
+) -> Result<()> {
+    validate_tree(repo, tree, tolerated_unclaimed, true)
+}
+
+fn validate_tree(
+    repo: &Repository,
+    tree: &Tree,
+    tolerated_unclaimed: &BTreeSet<String>,
+    tolerate_metadata_junk: bool,
+) -> Result<()> {
     let meta_tree = subtree(repo, tree, METADATA_DIR)
         .context("merged tree validation: .skills-manager missing")?;
 
@@ -64,6 +86,13 @@ pub fn validate_merged_tree(
         for entry in skills_tree.iter() {
             let name = entry.name().unwrap_or_default().to_string();
             let Some(stem) = name.strip_suffix(".json") else {
+                if tolerate_metadata_junk
+                    && super::decision::is_metadata_namespace_junk(&format!(
+                        "{METADATA_DIR}/skills/{name}"
+                    ))
+                {
+                    continue;
+                }
                 bail!("merged tree validation: unexpected file skills/{name}");
             };
             let raw = repo
