@@ -37,6 +37,35 @@ fn muted_at(now_ms: u64, suppress_until_ms: u64) -> bool {
     now_ms < suppress_until_ms
 }
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum EmitAction {
+    /// Forward the change to the frontend now.
+    Emit,
+    /// A real change arrived during the self-write mute: remember it and emit
+    /// once the window closes. Dropping it outright would leave the UI stale
+    /// when a user/external edit lands within the mute window (the whole point
+    /// of the mute is to hide OUR writes, not theirs).
+    Defer,
+    /// Nothing to forward (irrelevant event, or debounce coalesces it into an
+    /// emit that already happened).
+    Skip,
+}
+
+/// Pure routing for one observed change, split out for unit tests. `relevant`
+/// = the event/rescan actually warrants a refresh; `muted` = inside the
+/// self-write window; `debounced` = an emit fired less than the debounce ago.
+fn decide_emit(relevant: bool, muted: bool, debounced: bool) -> EmitAction {
+    if !relevant {
+        EmitAction::Skip
+    } else if muted {
+        EmitAction::Defer
+    } else if debounced {
+        EmitAction::Skip
+    } else {
+        EmitAction::Emit
+    }
+}
+
 /// Suppress `app-files-changed` emissions for [`SELF_WRITE_MUTE`] because the
 /// app is about to write to a watched directory. The frontend already refreshes
 /// after the user action that triggered the write, so echoing those writes back
@@ -203,20 +232,41 @@ pub fn start_file_watcher<R: tauri::Runtime>(app: tauri::AppHandle<R>, store: Ar
         let mut watched = HashSet::new();
         let mut last_sync = Instant::now() - WATCH_RESCAN_INTERVAL;
         let mut last_emit = Instant::now() - WATCH_EMIT_DEBOUNCE;
+        // A relevant change arrived while self-writes were muted; emit it once
+        // the window closes (the loop ticks at least every 500ms, so the flush
+        // below needs no extra timer).
+        let mut pending_emit = false;
+
+        let emit_now = |last_emit: &mut Instant| {
+            if let Err(err) = app.emit(APP_FS_CHANGED_EVENT, ()) {
+                log::debug!("Failed to emit app-files-changed: {err}");
+            } else {
+                *last_emit = Instant::now();
+            }
+        };
 
         loop {
             if last_sync.elapsed() >= WATCH_RESCAN_INTERVAL {
-                if sync_watch_set(&mut watcher, &mut watched, &store)
-                    && !self_write_muted()
-                    && last_emit.elapsed() >= WATCH_EMIT_DEBOUNCE
-                {
-                    if let Err(err) = app.emit(APP_FS_CHANGED_EVENT, ()) {
-                        log::debug!("Failed to emit app-files-changed: {err}");
-                    } else {
-                        last_emit = Instant::now();
-                    }
+                let changed = sync_watch_set(&mut watcher, &mut watched, &store);
+                match decide_emit(
+                    changed,
+                    self_write_muted(),
+                    last_emit.elapsed() < WATCH_EMIT_DEBOUNCE,
+                ) {
+                    EmitAction::Emit => emit_now(&mut last_emit),
+                    EmitAction::Defer => pending_emit = true,
+                    EmitAction::Skip => {}
                 }
                 last_sync = Instant::now();
+            }
+
+            // Flush a deferred emit once the mute window has closed.
+            if pending_emit
+                && !self_write_muted()
+                && last_emit.elapsed() >= WATCH_EMIT_DEBOUNCE
+            {
+                pending_emit = false;
+                emit_now(&mut last_emit);
             }
 
             match rx.recv_timeout(Duration::from_millis(500)) {
@@ -224,16 +274,14 @@ pub fn start_file_watcher<R: tauri::Runtime>(app: tauri::AppHandle<R>, store: Ar
                     if touches_central_repo(&event) {
                         super::auto_backup::notify_central_change();
                     }
-                    if !should_emit(&event)
-                        || self_write_muted()
-                        || last_emit.elapsed() < WATCH_EMIT_DEBOUNCE
-                    {
-                        continue;
-                    }
-                    if let Err(err) = app.emit(APP_FS_CHANGED_EVENT, ()) {
-                        log::debug!("Failed to emit app-files-changed: {err}");
-                    } else {
-                        last_emit = Instant::now();
+                    match decide_emit(
+                        should_emit(&event),
+                        self_write_muted(),
+                        last_emit.elapsed() < WATCH_EMIT_DEBOUNCE,
+                    ) {
+                        EmitAction::Emit => emit_now(&mut last_emit),
+                        EmitAction::Defer => pending_emit = true,
+                        EmitAction::Skip => {}
                     }
                 }
                 Ok(Err(err)) => {
@@ -262,6 +310,22 @@ mod tests {
         assert!(!muted_at(11, 10));
         // A zeroed deadline (never muted) is never active.
         assert!(!muted_at(0, 0));
+    }
+
+    #[test]
+    fn muted_relevant_changes_are_deferred_not_dropped() {
+        use super::{decide_emit, EmitAction};
+
+        // The mute hides the app's own write echo, but a real change during
+        // the window must survive as a deferred emit — never vanish.
+        assert_eq!(decide_emit(true, true, false), EmitAction::Defer);
+        assert_eq!(decide_emit(true, true, true), EmitAction::Defer);
+        // Live and quiet → emit; only debounce coalesces.
+        assert_eq!(decide_emit(true, false, false), EmitAction::Emit);
+        assert_eq!(decide_emit(true, false, true), EmitAction::Skip);
+        // Irrelevant events never emit or defer, muted or not.
+        assert_eq!(decide_emit(false, true, false), EmitAction::Skip);
+        assert_eq!(decide_emit(false, false, false), EmitAction::Skip);
     }
 
     #[test]
