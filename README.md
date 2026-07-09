@@ -263,7 +263,9 @@ Skills Manager is ad-hoc signed but not notarized (no paid Apple Developer ID), 
 ## Star History
 
 <p align="center">
-  <img src="assets/star-history.svg" width="800" alt="Star History chart for xingkongliang/skills-manager" />
+  <a href="https://github.com/xingkongliang/star-history-svg">
+    <img src="assets/star-history.svg" width="800" alt="Star History chart for xingkongliang/skills-manager" />
+  </a>
 </p>
 
 ## License

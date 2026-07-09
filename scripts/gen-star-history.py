@@ -225,7 +225,7 @@ def build_svg(stamps):
 
     # Watermark.
     parts.append(f'<path d="{star_path(W - R - 128, H - 18, 6.5)}" fill="{GREEN}"/>')
-    parts.append(txt(W - R, H - 13, "star-history.com", 14, MUTED, "end"))
+    parts.append(txt(W - R, H - 13, "star-history-svg", 14, MUTED, "end"))
 
     font_b64 = base64.b64encode(FONT.read_bytes()).decode()
     style = (f"@font-face{{font-family:'PatrickHand';font-style:normal;"

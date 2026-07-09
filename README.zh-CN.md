@@ -221,7 +221,9 @@ Skills Manager 使用 ad-hoc 签名，未做 Apple 公证（没有付费的 Appl
 ## Star 增长
 
 <p align="center">
-  <img src="assets/star-history.svg" width="800" alt="xingkongliang/skills-manager 的 Star History 图" />
+  <a href="https://github.com/xingkongliang/star-history-svg">
+    <img src="assets/star-history.svg" width="800" alt="xingkongliang/skills-manager 的 Star History 图" />
+  </a>
 </p>
 
 ## License
