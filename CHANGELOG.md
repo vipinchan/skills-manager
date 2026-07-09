@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.28.2] - 2026-07-10
+
+### Release Overview
+- Performance and correctness patch: faster startup and snappier actions, installing a specific skill can no longer pull in an entire repository by mistake, and the auto-update settings match the rest of the page.
+
+### User-facing
+- **Faster startup and snappier actions** — Launch no longer blocks on a full scan of every agent's skill directories; that reconciliation now runs in the background after the window is up. Project workspace scanning walks each skill's files once instead of twice, and the file watcher no longer fires a redundant full refresh in response to the app's own writes. Addresses the slow-startup / laggy-actions reports (#248).
+- **Installing a missing skill errors instead of installing the whole repo** — Asking to install a specific skill whose name doesn't exist in the source (an upstream rename or removal, a stale index, or a typo) previously fell back to copying the entire repository as a single "skill", duplicating every skill it contained. It now fails with a clear "skill not found" error and installs nothing (#278).
+- **Auto-update settings use segmented controls** — The "check interval" and "auto-apply" options on the Settings page were plain dropdowns; they now use the same segmented-button controls as the rest of the page (theme, sync mode, tray), so every option is visible at a glance (#241).
+
+### Developer & Governance
+- Startup-performance fix (#285) landed after three rounds of codex review: the stranded-target backfill moved off `setup()` into a post-window `spawn_blocking` gated by a candidate-set signature; project/workspace scanning collapsed two full directory walks per skill into one; and a 1.2s monotonic self-write mute window on the file watcher, refined to path-level muting plus a content-hash directory fingerprint so genuine external events are still delivered. +5 Rust tests.
+- Install fix (#280) makes `find_skill_dir` bail when a requested `skill_id` matches nothing, preserving the container/root fallback only for the `skill_id == None` enumeration flow; a read-only codex review confirmed no caller regressions, and a follow-up added — then strengthened after a second codex pass — a regression guard for the legitimate root-frontmatter-name match.
+- The README Star History chart is now self-hosted (`scripts/gen-star-history.py` plus a bundled font) instead of embedding the third-party image.
+- Backend Rust test suite at 387 passing; frontend `npm run build` clean.
 ## [1.28.1] - 2026-07-05
 
 ### Release Overview
