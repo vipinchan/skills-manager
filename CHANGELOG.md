@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### User-facing
+- **Windows: the app no longer fails to open after relocating the central library** — After moving the central library to another drive, an incomplete move could leave read-only Git pack files at the destination. The next launch tried to copy over them, hit "access denied (os error 5)", and the app died before any window or log appeared — it just wouldn't open. Migration now only ever moves into an empty destination; if it can't complete, the app keeps running against your existing library at its previous location (nothing is lost) and shows a banner explaining how to finish the move. A failed migration can no longer crash startup (#252).
+
+### Developer & Governance
+- `migrate_repo_if_needed` was rewritten to be infallible — it returns a decision (`Proceed` / `UseSource`) instead of an error, so a migration failure can never panic through the pre-window `.expect` in `run()`. Root cause: the crash only occurred when *overwriting* an existing read-only file, so migration now refuses any non-empty target (never blind-merging older source over newer data) and a fresh target makes the copy structurally incapable of overwriting a read-only pack. On failure it falls back to the intact source via a runtime base-dir override; detailed errors are deferred to `record_startup_error` and flushed once the logger exists (the pre-logger `log::error!` was a no-op); migration is skipped when a CLI base override is active. A grok review pass added two fixes: source/target are compared canonically (`fs::canonicalize`) so a cosmetic path difference — case, `8.3`, or a symlink — isn't taken for a real move and looped forever; and the fallback banner was reworded so it never tells the user to empty the path shown in Settings (which, under the override, is the live library). +6 Rust tests; suite at 393 passing, `npm run build` clean.
+
 ## [1.28.2] - 2026-07-10
 
 ### Release Overview

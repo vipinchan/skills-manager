@@ -833,6 +833,13 @@ pub fn run() {
             );
             startup_timings.log();
 
+            // Flush any errors stashed while resolving the central repo — that
+            // ran before this logger existed, so its own log calls were no-ops
+            // (e.g. a central-library migration that fell back to the source).
+            for detail in core::central_repo::take_startup_errors() {
+                log::error!("{detail}");
+            }
+
             // One-time repair for skills uploaded before sync targets were
             // registered on import: they have a center record but no target,
             // leaving them button-less in the workspace. This scans and hashes
